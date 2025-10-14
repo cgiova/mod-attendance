@@ -1,0 +1,93 @@
+Codice Gating Adattivo
+
+# ============================================================
+# MODELLO MULTIMODALE CON GATE ADATTIVO
+# ============================================================
+
+# Definizione input layers
+image_input = keras.Input(shape=(*CFG.image_size, 3), name="images")
+feat_input = keras.Input(shape=(feature_space.get_encoded_features().shape[1],), name="features")
+inp = {"images": image_input, "features": feat_input}
+
+# ------------------------------------------------------------
+# Branch per immagine
+# ------------------------------------------------------------
+backbone = keras_cv.models.EfficientNetV2Backbone.from_preset(CFG.preset)
+x1 = backbone(image_input)
+x1 = keras.layers.GlobalAveragePooling2D()(x1)
+x1 = keras.layers.Dropout(0.2)(x1)
+x1 = keras.layers.Dense(256, activation="selu", name="img_emb")(x1)
+
+# ------------------------------------------------------------
+# Branch per tabular
+# ------------------------------------------------------------
+x2 = keras.layers.Dense(96, activation="selu")(feat_input)
+x2 = keras.layers.Dense(128, activation="selu")(x2)
+x2 = keras.layers.Dropout(0.1)(x2)
+x2 = keras.layers.Dense(256, activation="selu", name="tab_emb")(x2)
+
+# ------------------------------------------------------------
+# GATE ADATTIVO
+# ------------------------------------------------------------
+# Combiniamo i due embedding e calcoliamo pesi dinamici
+fusion_input = keras.layers.Concatenate(name="fusion_input")([x1, x2])
+
+# MLP che produce due pesi normalizzati via softmax
+gate = keras.layers.Dense(64, activation="relu")(fusion_input)
+gate = keras.layers.Dense(2, activation="softmax", name="gate_weights")(gate)
+
+# Separiamo i due pesi
+w_img = keras.layers.Lambda(lambda w: w[:, 0:1], name="w_img")(gate)
+w_tab = keras.layers.Lambda(lambda w: w[:, 1:2], name="w_tab")(gate)
+
+# Applichiamo i pesi dinamici alle rispettive modalità
+x1_w = keras.layers.Multiply(name="weighted_img")([x1, w_img])
+x2_w = keras.layers.Multiply(name="weighted_tab")([x2, w_tab])
+
+# Fusione adattiva (somma pesata)
+fused = keras.layers.Add(name="fused")([x1_w, x2_w])
+
+# ------------------------------------------------------------
+# Testa finale
+# ------------------------------------------------------------
+out = keras.layers.Dense(1, activation="sigmoid", dtype="float32", name="output")(fused)
+
+# ------------------------------------------------------------
+# Build model
+# ------------------------------------------------------------
+model = keras.models.Model(inp, out, name="ISIC_Multimodal_Gated")
+
+# Compile model
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=1e-4),
+    loss=keras.losses.BinaryCrossentropy(label_smoothing=0.02),
+    metrics=[keras.metrics.AUC()],
+)
+
+model.summary()
+
+
+-----------------------------------------------------------------
+
+Dopo il training, puoi facilmente ispezionare o visualizzare i pesi del gate:
+
+# Ottieni i pesi di gating per un batch
+get_gate = keras.models.Model(model.input, model.get_layer("gate_weights").output)
+
+sample_batch = next(iter(validation_ds))
+w = get_gate(sample_batch[0])  # shape (batch_size, 2)
+
+print("w_img mean:", np.mean(w[:,0]))
+print("w_tab mean:", np.mean(w[:,1]))
+
+------------------------------------------------------------------
+
+Se vuoi evitare che il gate diventi troppo deterministico (cioè sempre 0 o 1), possiamo aggiungere un termine di entropia alla loss
+
+def gated_loss(y_true, y_pred):
+    base_loss = keras.losses.binary_crossentropy(y_true, y_pred, label_smoothing=0.02)
+    gate_out = model.get_layer("gate_weights").output
+    entropy = -tf.reduce_mean(tf.reduce_sum(gate_out * tf.math.log(gate_out + 1e-6), axis=1))
+    return base_loss + 1e-4 * Entropy
+
+La funzione gated_loss sostituisce la loss standard (BinaryCrossentropy) nel momento in cui compili il modello.

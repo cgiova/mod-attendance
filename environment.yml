@@ -1,0 +1,16 @@
+name: isic24_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - ipykernel
+  - pandas
+  - numpy
+  - matplotlib
+  - scikit-learn
+  - ca-certificates
+  - openssl
+  - pathlib
+  - h5py
+prefix: /opt/homebrew/Caskroom/mambaforge/base/envs/isic24_env

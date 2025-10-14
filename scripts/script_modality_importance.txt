@@ -1,0 +1,60 @@
+# ============================================================
+# ANALISI DI "MODALITY IMPORTANCE" VIA GRADIENTI
+# ============================================================
+
+import tensorflow as tf
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Carica il modello migliore
+model = keras.models.load_model("best_model.keras")
+
+# Estrai i layer chiave
+image_input = model.get_layer("images").input
+feat_input = model.get_layer("features").input
+
+# Identifichiamo i due rami fino alla concatenazione
+# (x1 = branch immagini, x2 = branch tabulari)
+concat_layer = None
+for layer in model.layers:
+    if isinstance(layer, tf.keras.layers.Concatenate):
+        concat_layer = layer
+        break
+
+# Costruiamo due sottoreti che terminano subito prima della concatenazione
+img_backbone_model = keras.Model(inputs=model.inputs, outputs=concat_layer.input[0])
+tab_backbone_model = keras.Model(inputs=model.inputs, outputs=concat_layer.input[1])
+
+# Funzione per calcolare i gradienti rispetto a ciascun embedding
+@tf.function
+def compute_modality_gradients(img_batch, tab_batch):
+    with tf.GradientTape(persistent=True) as tape:
+        # Calcola embedding per ciascuna modalità
+        z_img = img_backbone_model({"images": img_batch, "features": tab_batch}, training=False)
+        z_tab = tab_backbone_model({"images": img_batch, "features": tab_batch}, training=False)
+        tape.watch(z_img)
+        tape.watch(z_tab)
+
+        # Ricostruisci la parte finale (post-concat) del modello
+        concat = tf.concat([z_img, z_tab], axis=-1)
+        y_pred = model.layers[-1](concat)  # layer sigmoide finale
+
+    grad_img = tape.gradient(y_pred, z_img)
+    grad_tab = tape.gradient(y_pred, z_tab)
+    return grad_img, grad_tab, y_pred
+
+# =============================================
+# Calcolo su un batch di validation
+# =============================================
+# Prendi un batch dalla validation set
+batch = next(iter(validation_ds))
+img_batch = batch[0]["images"]
+tab_batch = batch[0]["features"]
+y_true = batch[1]
+
+# Calcola i gradienti
+grad_img, grad_tab, y_pred = compute_modality_gradients(img_batch, tab_batch)
+
+# Calcola norma L2 dei gradienti
+importance_img = tf.norm(grad_img, axis=list(range(1, len(grad_img.shape)))).numpy()
+importance_tab = tf.norm(grad_tab, axis=list(range(1, len(grad_tab.shape)))).numpy()
