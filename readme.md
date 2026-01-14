@@ -42,8 +42,10 @@ These instructions will get you a copy of the project up and running on your loc
 
 ### Data
 
-This repo contains code and notebooks. The ISIC 2024 dataset is expected to be available locally (not committed to Git).
+This repo contains code and notebooks. The ISIC 2024 dataset is expected to be available locally (not committed to Git). 
+Data are stored in: [link to Drive repo]
 
+### Initializing
 Set an environment variable pointing to the dataset root folder:
 
 **macOS / Linux**

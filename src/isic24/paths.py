@@ -12,3 +12,9 @@ def get_data_root() -> Path:
     if p:
         return Path(p).expanduser().resolve()
     return (REPO_ROOT / "data").resolve()
+
+def get_artifacts_root() -> Path:
+    p = os.environ.get("ISIC24_ARTIFACT_DIR")
+    if p:
+        return Path(p).expanduser().resolve()
+    return (REPO_ROOT / "artifacts").resolve()
