@@ -1,1 +1,37 @@
-/data
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Envs
+.venv/
+venv/
+.env
+.env.*
+conda/
+*.conda
+
+# Data (never commit)
+data/
+*.hdf5
+*.h5
+*.parquet
+*.csv
+*.zip
+
+# Models/artifacts (never commit)
+models/
+runs/
+outputs/
+wandb/
+tb/
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
