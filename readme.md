@@ -40,26 +40,20 @@ Write about 1-2 paragraphs describing the purpose of your project.
 
 These instructions will get you a copy of the project up and running on your local machine for development and testing purposes. See [deployment](#deployment) for notes on how to deploy the project on a live system.
 
-### Prerequisites
+### Data
 
-What things you need to install the software and how to install them.
+This repo contains code and notebooks. The ISIC 2024 dataset is expected to be available locally (not committed to Git).
 
-```
-Give examples
+Set an environment variable pointing to the dataset root folder:
+
+**macOS / Linux**
+```bash
+export ISIC24_DATA_DIR="/absolute/path/to/data"
 ```
 
 ### Installing
-
-A step by step series of examples that tell you how to get a development env running.
-
-Say what the step will be
-
 ```
-Give the example
-```
-
-And repeat
-
+python -m pip install -e .
 ```
 until finished
 ```
