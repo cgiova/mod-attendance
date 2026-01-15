@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./isic24-dum"
+    ]
+}

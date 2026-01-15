@@ -1,0 +1,14 @@
+{
+    "sex": "string_categorical",
+    "anatom_site_general": "string_categorical",
+    "tbp_tile_type": "string_categorical",
+    "tbp_lv_location": "string_categorical",
+    "age_approx": "float_discretized",
+    "tbp_lv_nevi_confidence": "float_normalized",
+    "clin_size_long_diam_mm": "float_normalized",
+    "tbp_lv_areaMM2": "float_normalized",
+    "tbp_lv_area_perim_ratio": "float_normalized",
+    "tbp_lv_color_std_mean": "float_normalized",
+    "tbp_lv_deltaLBnorm": "float_normalized",
+    "tbp_lv_minorAxisMM": "float_normalized"
+}

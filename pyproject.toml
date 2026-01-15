@@ -1,15 +1,16 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "isic24"
 version = "0.1.0"
-requires-python = ">=3.10"
+description = "ISIC24 project"
+requires-python = ">=3.11"
 dependencies = []
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
-[project.scripts]
-isic24 = "isic24.cli:main"
+[tool.setuptools.packages.find]
+where = ["src"]
