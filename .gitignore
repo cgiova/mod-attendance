@@ -1,4 +1,4 @@
-# Python
+# python
 __pycache__/
 *.pyc
 *.pyo
@@ -8,7 +8,7 @@ __pycache__/
 .ruff_cache/
 .ipynb_checkpoints/
 
-# Envs
+# envs
 .venv/
 venv/
 .env
@@ -16,7 +16,7 @@ venv/
 conda/
 *.conda
 
-# Data (never commit)
+# data
 data/
 *.hdf5
 *.h5
@@ -24,7 +24,7 @@ data/
 *.csv
 *.zip
 
-# Models/artifacts (never commit)
+# artifacts
 models/
 runs/
 outputs/
@@ -33,6 +33,8 @@ tb/
 logs/
 artifacts/
 
-# OS
+# os
 .DS_Store
 Thumbs.db
+
+src/isic24/colab_bootstrap.sh
