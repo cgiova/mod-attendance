@@ -53,34 +53,26 @@ Set an environment variable pointing to the dataset root folder:
 export ISIC24_DATA_DIR="/absolute/path/to/data"
 ```
 
-### Installing
+### Installation
 ```
 python -m pip install -e .
 ```
-until finished
+## Pip
+From the repo root:
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
-End with an example of getting some data out of the system or using it for a little demo.
-
-## 🔧 Running the tests <a name = "tests"></a>
-
-Explain how to run the automated tests for this system.
-
-### Break down into end to end tests
-
-Explain what these tests test and why
-
-```
-Give an example
+## Conda/Mamba
+From the repo root:
+```bash
+mamba env create -f environment.yml
+mamba activate your_project
+python -m pip install -e .
 ```
 
-### And coding style tests
-
-Explain what these tests test and why
-
-```
-Give an example
-```
 
 ## 🎈 Usage <a name="usage"></a>
 
