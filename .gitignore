@@ -16,13 +16,13 @@ venv/
 conda/
 *.conda
 
-# data
-data/
-*.hdf5
-*.h5
-*.parquet
-*.csv
-*.zip
+## data
+#data/
+#*.hdf5
+#*.h5
+#*.parquet
+#*.csv
+#*.zip
 
 # artifacts
 models/
