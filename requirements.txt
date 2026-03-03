@@ -1,6 +1,6 @@
 keras_cv==0.9.0
-matplotlib==3.10.8
-numpy==2.4.1
-tensorflow==2.18.0
-protobuf==3.20.*
+matplotlib
+numpy
+tensorflow
+protobuf
 opencv-python
