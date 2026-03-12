@@ -6,7 +6,7 @@
 
 ## Phase 1 · Foundation
 
-- [ ] `[M]` Update readme file
+- [x] `[M]` Update readme file
 - [ ] `[C]` Migrate all notebook logic to production-ready code
 - [ ] `[C]` Implement MLflow tracking (params, metrics, dataset hash, git tag)
 
@@ -17,7 +17,7 @@
 
 ## Phase 3 · Explainability & Trustworthiness
 
-- [ ] `[H]` Add visual XAI method (e.g. SHAP plots, Grad-CAM)
+- [ ] `[H]` Add visual XAI method (e.g. Integrated gradients)
 - [ ] `[H]` Modality weight analysis — test impact on discrimination + explanation quality
 - [ ] `[H]` Per-sample confidence & uncertainty output for clinician ⚠️ *ask Pellegrini on metric choice*
 - [ ] `[M]` Zone-based hybrid ensemble (decision space clustering + learning-to-defer)
