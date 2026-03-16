@@ -19,7 +19,7 @@
 - [ ] `[H]` Add visual XAI method (smoothgrad or Grad-CAM++)
 - [ ] `[H]` Add tabular XAI method (Lore from XAI-Lib [https://github.com/kdd-lab/XAI-Lib.git])
 - [ ] `[H]` Modality weight analysis — test impact on discrimination + explanation quality
-- [ ] `[H]` Per-sample confidence & uncertainty output for clinician ⚠️ *ask Pellegrini on metric choice*
+- [ ] `[H]` Per-sample confidence & uncertainty output for clinician ⚠️ *ask Pellungrini on metric choice*
 - [ ] `[M]` Zone-based hybrid ensemble (decision space clustering + learning-to-defer)
 
 ## Interaction & Deployment
