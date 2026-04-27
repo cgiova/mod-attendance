@@ -42,3 +42,4 @@ src/isic24/colab_bootstrap.sh
 /CLAUDE.md
 
 .claude
+/smoothgrad_logs/
