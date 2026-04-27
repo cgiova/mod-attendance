@@ -16,8 +16,7 @@
 
 ## Explainability
 
-- [ ] `[H]` Add visual XAI method (smoothgrad or Grad-CAM++)
-- [ ] `[H]` Add tabular XAI method (Lore from XAI-Lib [https://github.com/kdd-lab/XAI-Lib.git])
+- [ ] `[L]` Add additional visual XAI method (smoothgrad or Grad-CAM++)
 - [ ] `[H]` Modality weight analysis — test impact on discrimination + explanation quality
 - [ ] `[H]` Per-sample confidence & uncertainty output for clinician ⚠️ *ask Pellungrini on metric choice*
 - [ ] `[M]` Zone-based hybrid ensemble (decision space clustering + learning-to-defer)
@@ -40,4 +39,6 @@
 ## Completed
 
 <!-- Move tasks here with completion date once done -->
-- [x] `[M]` Update readme file -- completed 2025-03-01
+- [x] `[M]` Update readme file -- completed 2026-03-01
+- [x] `[H]` Add tabular XAI method (Lore from XAI-Lib [https://github.com/kdd-lab/XAI-Lib.git]) 2026-27-01
+
