@@ -43,3 +43,4 @@ src/isic24/colab_bootstrap.sh
 
 .claude
 /smoothgrad_logs/
+/AGENTS.md
