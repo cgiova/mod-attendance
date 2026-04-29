@@ -16,3 +16,4 @@ XAI-Library @ git+https://github.com/kdd-lab/XAI-Lib.git@8ea5a3108443ed43215e3ed
 tqdm==4.67.3
 tf-explain==0.3.1
 scipy==1.17.1
+tree-0.2.4
