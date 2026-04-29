@@ -1,14 +1,18 @@
 keras_cv==0.9.0
-matplotlib
+matplotlib==3.10.9
 numpy>=1.26.0,<2.0.0
 tensorflow==2.16.1
 keras==3.3.3
-protobuf
-opencv-python
-pandas
-joblib
-seaborn
+protobuf==4.25.9
+opencv-python==4.11.0.86
+pandas==3.0.2
+joblib==1.5.3
+seaborn==0.13.2
 shap<0.46
 tf-explain==0.3.1
 scikit-image<0.24
 tifffile<2025
+XAI-Library @ git+https://github.com/kdd-lab/XAI-Lib.git@8ea5a3108443ed43215e3edacd6e925c257ebcfb
+tqdm==4.67.3
+tf-explain==0.3.1
+scipy==1.17.1
