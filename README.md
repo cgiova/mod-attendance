@@ -52,13 +52,18 @@ export ISIC24_DATA_DIR="/absolute/path/to/data"
 ```
 
 ### Installation <a name = "installation"></a>
+This project is tested with **Python 3.12**.
+
+#### macOS / Linux
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 ```
-python -m pip install -e .
-```
+
 #### Pip
 From the repo root:
 ```bash
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
