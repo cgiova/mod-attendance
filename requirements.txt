@@ -2,7 +2,8 @@ keras_cv==0.9.0
 matplotlib==3.10.9
 numpy>=2.0,<2.5
 tensorflow[and-cuda]==2.18.*
-keras==3.3.3
+#keras==3.3.3
+keras>=3.5.0
 protobuf==4.25.9
 opencv-python==4.11.0.86
 pandas>=2.2
