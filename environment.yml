@@ -2,7 +2,7 @@ name: isic24_env
 channels:
   - conda-forge
 dependencies:
-  - python>=3.11
-  - pip
+  - python=3.12
+  - pip>=25
   - pip:
       - -r requirements.txt
