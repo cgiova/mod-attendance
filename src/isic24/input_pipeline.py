@@ -44,7 +44,7 @@ def build_dataset(
     features,
     labels=None,
     batch_size=32,
-    image_size=(224, 224),
+    image_size=(256, 256),
     num_classes=1,
     seed=42,
     decode_fn=None,
