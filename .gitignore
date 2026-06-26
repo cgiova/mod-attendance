@@ -55,3 +55,4 @@ scripts/homogenize_artifacts.py
 /.agents/.junie/
 /.agents/.codex/
 /.agents/
+/MODALITY_ATTENDANCE_COLLECTION_STATUS.md
