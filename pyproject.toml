@@ -4,8 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "isic24"
-requires-python = ">=3.11"
-dependencies = []
+version = "0.0.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "keras-cv==0.9.0",
+    "matplotlib==3.10.9",
+    "numpy>=2.0,<2.1",
+    "tensorflow==2.18.1; platform_system != 'Linux' or platform_machine != 'x86_64'",
+    "tensorflow[and-cuda]==2.18.1; platform_system == 'Linux' and platform_machine == 'x86_64'",
+    "keras>=3.5.0",
+    "protobuf==4.25.9",
+    "opencv-python==4.11.0.86",
+    "pandas>=2.2,<3",
+    "joblib==1.5.3",
+    "seaborn==0.13.2",
+    "shap>=0.46",
+    "tf-explain==0.3.1",
+    "scikit-image<0.24",
+    "tifffile<2025",
+    "XAI-Library @ git+https://github.com/kdd-lab/XAI-Lib.git@8ea5a3108443ed43215e3edacd6e925c257ebcfb",
+    "tqdm==4.67.3",
+    "scipy==1.17.1",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
