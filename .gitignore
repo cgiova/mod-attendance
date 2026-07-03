@@ -56,3 +56,4 @@ scripts/homogenize_artifacts.py
 /.agents/.codex/
 /.agents/
 /MODALITY_ATTENDANCE_COLLECTION_STATUS.md
+/notebooks/modality_attendance/backfill_lore_loss_reg.py
