@@ -41,6 +41,20 @@ src/isic24/colab_bootstrap.sh
 /src/isic24/script_modlaity_importance_change_aggiunta.docx
 /CLAUDE.md
 
-.claude
+.agents/.claude
 /smoothgrad_logs/
 /AGENTS.md
+.idea/AICommit.xml
+REPORT_MODALITY_ATTENDANCE.md
+.idea/isic24.iml
+.idea/isic24.iml
+.idea/isic24.iml
+scripts/homogenize_artifacts.py
+.idea/pyProjectModel.xml
+.idea/isic24.iml
+/.agents/.junie/
+/.agents/.codex/
+/.agents/
+/MODALITY_ATTENDANCE_COLLECTION_STATUS.md
+/notebooks/modality_attendance/backfill_lore_loss_reg.py
+/condaenv.hpvibbkd.requirements.txt

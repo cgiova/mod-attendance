@@ -66,8 +66,8 @@ python -m pip install -e .
 #### Conda/Mamba
 From the repo root:
 ```bash
-mamba env create -f environment.yml
-mamba activate your_project
+conda env create -f environment.yml
+conda activate isic24_env
 python -m pip install -e .
 ```
 
