@@ -45,7 +45,7 @@ src/isic24/colab_bootstrap.sh
 /smoothgrad_logs/
 /AGENTS.md
 .idea/AICommit.xml
-REPORT_MODALITY_ATTENDANCE.md
+artifacts/REPORT_MODALITY_ATTENDANCE.md
 .idea/isic24.iml
 .idea/isic24.iml
 .idea/isic24.iml

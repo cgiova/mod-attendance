@@ -22,19 +22,12 @@
 
 - [About](#about)
 - [Getting Started](#getting_started)
-- [TODO](TODO.md)
+- [TODO](artifacts/TODO.md)
 - [Authors](#authors)
 - [Acknowledgments](#acknowledgements)
 
 ## 🧐 About <a name = "about"></a>
-This project investigates how explicitly controlling modality attention in multimodal neural networks affects both model 
-performance and the quality of generated explanations in a clinical decision support context. Using skin lesion images 
-and tabular clinical metadata as input modalities, we introduce a framework of regularization strategies that allow 
-deliberate, interpretable control over how visual and clinical features are weighted — both during training and at 
-inference time. Rather than relying solely on the network's learned attention mechanism to balance modality contributions, 
-our approach makes modality governance explicit and transparent. The goal is to evaluate whether this produces explanations 
-that are more faithful, stable, and actionable for clinicians with no technical background, and to quantify any trade-offs 
-with predictive performance.
+This project investigates how explicitly controlling modality attention in multimodal neural networks affects both modelperformance and the quality of generated explanations in a clinical decision support context. Using different healthcare multimodal datasets, composed by images and features as input modalities, we introduce a framework of regularization strategies that allow deliberate, interpretable control over how visual and clinical features are weighted — both during training and at inference time. Rather than relying solely on the network's learned attention mechanism to balance modality contributions, our approach makes modality governance explicit and transparent. The goal is to evaluate whether this produces explanations that are more faithful, stable, and actionable for clinicians with no technical background, and to quantify any trade-offs with predictive performance.
 
 ## 🏁 Getting Started <a name = "getting_started"></a>
 
