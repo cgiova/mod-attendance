@@ -58,3 +58,4 @@ scripts/homogenize_artifacts.py
 /MODALITY_ATTENDANCE_COLLECTION_STATUS.md
 /notebooks/modality_attendance/backfill_lore_loss_reg.py
 /condaenv.hpvibbkd.requirements.txt
+/notebooks/modality_attendance/feature_space_guard.py
