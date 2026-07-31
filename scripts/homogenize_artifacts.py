@@ -19,10 +19,14 @@ import math
 import re
 import shutil
 import statistics
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from isic24.run_ids import make_exp_tag, make_run_dir, make_run_id, make_setting_folder  # noqa: E402
 
 
 KNOWN_IMPLS = (
@@ -398,16 +402,14 @@ def make_study_plan(
     moves: list[MovePlan] = []
     for candidate in sorted(group, key=lambda c: (c.seed, c.setting_tag, c.old_study_tag)):
         params = infer_params(candidate.impl, candidate.setting_tag, candidate.config, candidate.summary_row)
-        new_exp_tag = f"{study_tag}/seed_{candidate.seed}"
-        new_run_id = f"{new_exp_tag}__{candidate.setting_tag}__e{candidate.epochs}"
+        # Le formule di run_id/run_dir stanno in `isic24.run_ids`, non qui: erano replicate
+        # in tre posti e le tre copie non concordavano.  Questa, in particolare, non gestiva
+        # `setting_tag=None` e avrebbe scritto "None__e20" dove il training scrive "run__e20".
+        new_exp_tag = make_exp_tag(study_tag, candidate.seed)
+        new_setting_folder = make_setting_folder(candidate.setting_tag, candidate.epochs)
+        new_run_id = make_run_id(new_exp_tag, new_setting_folder)
         new_model_name = f"{candidate.impl}__{candidate.setting_tag}" if candidate.setting_tag else candidate.impl
-        new_run_dir = (
-            runs_root
-            / candidate.impl
-            / study_tag
-            / f"seed_{candidate.seed}"
-            / f"{candidate.setting_tag}__e{candidate.epochs}"
-        )
+        new_run_dir = Path(make_run_dir(runs_root, candidate.impl, new_exp_tag, new_setting_folder))
         moves.append(
             MovePlan(
                 candidate=candidate,
