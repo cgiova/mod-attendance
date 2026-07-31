@@ -448,8 +448,14 @@ class ShapCallback(Callback):
         max_samples: int = 512,   # total samples in explanation set
         max_batches: int | None = None,  # limit num batches to read, or None
         rng_seed: int = 0,
+        subset_idx=None,           # indici POSIZIONALI in validation_df; None = prefisso
+        subset_fingerprint=None,   # stampigliato nell'npz: senza, i file non sono
+                                   # riutilizzabili sotto un campione diverso (guard in
+                                   # xai_faithfulness._load_shap_values)
     ):
         super().__init__()
+        self.subset_idx = None if subset_idx is None else np.asarray(subset_idx, int)
+        self.subset_fingerprint = subset_fingerprint
         self.data_source = data_source
         self.validation_df = validation_df
         self.feat_cols = feat_cols
@@ -532,6 +538,17 @@ class ShapCallback(Callback):
             self.validation_df.iloc[:n_collected][self.feat_cols].reset_index(drop=True)
         )
 
+        if self.subset_idx is not None:
+            if n_collected <= int(self.subset_idx.max()):
+                raise RuntimeError(
+                    f"il subset chiede la riga {int(self.subset_idx.max())} ma ne sono state "
+                    f"lette {n_collected}: alza max_samples/max_batches di ShapCallback.")
+            self._images = self._images[self.subset_idx]
+            self._features = self._features[self.subset_idx]
+            self._labels = self._labels[self.subset_idx]
+            self._raw_batch_df = (self._raw_batch_df.iloc[self.subset_idx]
+                                  .reset_index(drop=True))
+
     # ---------- Keras hooks ---------- #
     def on_train_begin(self, logs=None):
         self._freeze_batch_from_dataset(self.data_source)
@@ -578,6 +595,10 @@ class ShapCallback(Callback):
             mean_abs_all=mean_abs_all,
             mean_abs_pos=mean_abs_pos,
             mean_abs_neg=mean_abs_neg,
+            # L'impronta del campione: `explained_indices` sono POSIZIONI, quindi senza
+            # questa un npz non e' distinguibile da uno prodotto su altre righe.
+            **({} if self.subset_fingerprint is None
+               else {"subset_fingerprint": str(self.subset_fingerprint)}),
         )
 
         # Tabular share = sum |SHAP| over tabular dims / total. Here all encoded features

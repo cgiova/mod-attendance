@@ -512,12 +512,25 @@ def faith_subsets(k=5, n=FAITH_N_SAMPLES, seed=0, n_val=None):
     return [np.arange(n)] + [np.sort(rest[i * n:(i + 1) * n]) for i in range(k - 1)]
 
 
+# Campione ATTIVO di default. `None` = comportamento storico (le prime N righe). Lo imposta
+# `xai_subset.adopt(...)` una volta per sessione, ed e' cosi' che la scelta del campione
+# diventa un DEFAULT del framework invece di un argomento da ricordarsi a ogni chiamata:
+# ogni call site che non passa `subset_idx` eredita questo.
+FAITH_SUBSET_IDX = None
+
+
 def _build_faith_subset(n, subset_idx=None):
     """Validation samples for the faithfulness run.
 
-    subset_idx=None -> first `n` (the notebook's original, deterministic behaviour).
-    subset_idx=array -> those specific validation rows (used by the 5-subset check).
+    subset_idx=None  -> `FAITH_SUBSET_IDX` se impostato, altrimenti le prime `n` righe.
+    subset_idx=array -> quelle righe di validation (usato dal check a 5 sottoinsiemi).
+
+    NB `faith_subsets` costruisce apposta il sottoinsieme 0 come `np.arange(n)`, cioe' il
+    prefisso: quel check confronta batch diversi FRA LORO e deve restare sul prefisso anche
+    quando il default e' un altro. Passa sempre `subset_idx` esplicito, quindi non eredita.
     """
+    if subset_idx is None and FAITH_SUBSET_IDX is not None:
+        subset_idx = FAITH_SUBSET_IDX
     raw_full = _CTX.validation_df.reset_index(drop=True)
     take_n = n if subset_idx is None else int(np.max(subset_idx)) + 1
     imgs, labs, got = [], [], 0
