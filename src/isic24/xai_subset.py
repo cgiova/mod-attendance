@@ -270,6 +270,23 @@ SUBSET_TASKS = {"shap_tab": ("faith", "shap"), "lore_sa": ("lore",),
                 "gradcam_img": ("gradcam",)}
 
 
+def run_dir_abs(run_dir, art_path):
+    """Ri-radica un `run_dir` letto da un CSV sull'albero degli artefatti LOCALE.
+
+    I CSV di riepilogo (`master_results_rows.csv`, i `*_combined.csv` per famiglia) portano
+    `run_dir` come percorso ASSOLUTO della macchina che ha fatto il training —
+    `/home/claudio/isic24-dum/...` — che qui non esiste. Usato grezzo da' un
+    `ValueError: File not found` su un percorso che *sembra* giusto, ed e' un errore che
+    compare solo su una macchina diversa da quella di origine: cioe' sempre, tranne dove e'
+    stato scritto.
+
+    Questa e' la SESTA copia di `split("artifacts/enhanced/")[-1]` — le altre cinque stanno
+    in `xai_faithfulness`, `xai_driver`, `xai_metrics` (x2) e piu' sotto in questo modulo.
+    E' la voce «doppioni di mappatura» della lista di pulizia: le altre vanno tirate qui.
+    """
+    return os.path.join(str(art_path), str(run_dir).split("artifacts/enhanced/")[-1])
+
+
 def out_dir_for(run_dir, kind):
     """Dove vanno gli artefatti di `kind` per questa run. `kind` in SUBSET_KINDS."""
     if kind not in SUBSET_KINDS:
