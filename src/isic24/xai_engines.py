@@ -604,6 +604,18 @@ class ShapCallback(Callback):
             # questa un npz non e' distinguibile da uno prodotto su altre righe.
             **({} if self.subset_fingerprint is None
                else {"subset_fingerprint": str(self.subset_fingerprint)}),
+            # La POSIZIONE IN `validation_df` di ogni campione spiegato — la stessa chiave,
+            # con lo stesso significato, che scrivono Grad-CAM (`gradcam_arrays_*.npz`) e
+            # LORE (colonna `val_index` nel per-sample CSV).
+            #
+            # Serve perche' `explained_indices` NON e' quella cosa: sono posizioni DENTRO il
+            # campione (0..n-1), quindi due motori sullo stesso campione producono indici
+            # che si somigliano e non sono confrontabili. E' esattamente il modo in cui
+            # l'accordo SHAP<->LORE usciva NaN. Con `val_index` i tre motori si riallineano
+            # per costruzione, senza dover sapere come e' stato costruito il campione.
+            **({} if self.subset_idx is None
+               else {"val_index": np.asarray(self.subset_idx, int)[
+                   np.asarray(stats["explained_indices"], int)]}),
         )
 
         # Tabular share = sum |SHAP| over tabular dims / total. Here all encoded features
