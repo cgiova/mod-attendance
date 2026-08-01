@@ -20,8 +20,26 @@ stratificato n=256 ci sono **222 lesioni uniche** su 256 righe, e fra gli 85 pos
 lesioni uniche** (molteplicita' fino a 3). La XAI spiega la stessa lesione piu' volte: i campioni
 non sono indipendenti e **ogni intervallo di confidenza per run e' ottimistico**.
 
-Il rimedio e' deduplicare su `isic_id`, non stratificare. NON ancora implementato: e' il
-pezzo da scrivere, e va deciso insieme a quale n serve davvero una volta noto l'n efficace.
+Il rimedio e' deduplicare su `isic_id`, non stratificare: `unique_lesion_subset` (+ `adopt`),
+usato in produzione dal 31/07 con n=144 lesioni distinte, balance='equal'.
+
+⚠️ E IL PREFISSO DI *QUESTO* CAMPIONE E' SBILANCIATO SUL SERIO (misurato 2026-08-01)
+------------------------------------------------------------------------------------
+Non contraddice quanto sopra: il prefisso di `validation_df` sta davvero a 0.336. Ma
+`unique_lesion_subset` tiene la PRIMA occorrenza di ogni lesione, che per un positivo e' il
+minimo di ~5 copie (`pos_sample=5.0`) e per un negativo un'estrazione sola. Ordinando gli
+indici i positivi finiscono davanti: mediana dell'indice 160 sui positivi contro 581 sui
+negativi. Sul campione n=144 (50/50 per costruzione) i primi 48 sono **35 pos / 13 neg**.
+
+Quindi: per spiegarne un sottoinsieme si passa un array di indici ESPLICITO e bilanciato,
+non si lascia troncare `max_explain_samples`. Confronti fra strategie restano validi (tutte
+le run vedono gli stessi campioni); livelli assoluti e contrasti fra classi no.
+
+DOVE FINISCONO GLI ARTEFATTI (dal 2026-08-01)
+---------------------------------------------
+Dentro la run, in sottocartelle proprie: `<run_dir>/xai/shap_tab/` e
+`<run_dir>/xai/lore_sa/` (vedi `out_dir_for`). Solo cio' che e' cross-run — tabelle e
+figure di confronto fra famiglie, `report()` — sta in `runs/_faithfulness/`.
 
 COSA RESTA VALIDO
 -----------------
@@ -39,9 +57,10 @@ import os
 
 import numpy as np
 
-# Radice di default per tutto cio' che nasce dal campione stratificato. Fuori dalle run
-# canoniche di proposito: cancellarla per intero non deve perdere niente di pubblicato.
-STRATIFIED_ROOT = os.path.join("runs", "_stratified")
+# Gli artefatti PER RUN vivono dentro la run (vedi `out_dir_for` piu' sotto). Qui resta
+# solo la destinazione di cio' che e' CROSS-RUN e quindi non appartiene a nessuna: tabelle
+# e figure di confronto fra famiglie.
+AGGREGATE_DIRNAME = "_faithfulness"
 
 
 def stratified_subset(labels, n, seed=0):
@@ -222,40 +241,93 @@ def verify_snapshot(snap, isic_ids):
 
 
 # --------------------------------------------------------------------------------------
-# Ripresa — per la radice stratificata, dove ne' xai_status.json ne' il write guard arrivano
+# DOVE VANNO GLI ARTEFATTI DEL CAMPIONE  (rifatto il 2026-08-01, richiesta di Claudio:
+# "ogni artefatto relativo alla run deve stare nella cartella originale della run")
+#
+# Prima esisteva una radice parallela `runs/_subset/<run_id__>/`, che replicava l'albero
+# delle run e teneva gli artefatti lontani dai canonici. Teneva davvero, ma spargeva la
+# stessa run su due posti e non era la struttura da portarsi sui dataset nuovi.
+#
+# Ora si scrive DENTRO la run, in sottocartelle che nessun motore canonico usa:
+#
+#     <run_dir>/xai/shap_tab/   attribuzione tabellare allineata + fedelta' con segno
+#     <run_dir>/xai/lore_sa/    LORE-SA (regole per campione)
+#
+# La separazione dai canonici la fa il NOME della cartella, non la distanza: `xai/shap/`,
+# `xai/gradcam/`, `xai/lore/` e `xai/faithfulness/` restano intatti e nessuna scrittura
+# nuova puo' finirci dentro (cfr. il SUBSET GUARD in `xai_faithfulness`, che continua a
+# rifiutare `xai/faithfulness/` finche' un campione e' adottato).
+#
+# La stampigliatura di ripresa vive nella stessa sottocartella dell'artefatto, quindi le
+# due riprese sono indipendenti per costruzione e il prefisso `lore-` sull'impronta --
+# che serviva solo a separarle quando condividevano una directory -- non serve piu'.
 # --------------------------------------------------------------------------------------
-def stamp_path(out_root, run_id, fp):
-    """Il file che dice 'questa run e' gia' fatta CON QUESTA impronta'."""
-    return os.path.join(out_root, run_id.replace("/", "__"), f"DONE.{fp}.json")
+SUBSET_KINDS = ("shap_tab", "lore_sa", "gradcam_img")
+
+# Le cartelle nuove per motore, e i "compiti" che ciascuna ospita. `shap_tab` ne ha DUE
+# (gli array SHAP e la fedelta' con segno), quindi li' la stampigliatura deve dire quale.
+SUBSET_TASKS = {"shap_tab": ("faith", "shap"), "lore_sa": ("lore",),
+                "gradcam_img": ("gradcam",)}
 
 
-def is_done(out_root, run_id, fp):
-    return os.path.exists(stamp_path(out_root, run_id, fp))
+def out_dir_for(run_dir, kind):
+    """Dove vanno gli artefatti di `kind` per questa run. `kind` in SUBSET_KINDS."""
+    if kind not in SUBSET_KINDS:
+        raise ValueError(f"kind={kind!r}: attesi {SUBSET_KINDS}")
+    return os.path.join(run_dir, "xai", kind)
 
 
-def mark_done(out_root, run_id, fp, payload=None):
+def stamp_path(run_dir, kind, fp, task=None):
+    """Il file che dice 'questo compito e' gia' fatto CON QUESTA impronta'.
+
+    ⚠️ `task=None` deve produrre ESATTAMENTE `DONE.<fp>.json`, il nome che hanno gia' le
+    110 stampigliature della fedelta' e le 8 di LORE.  Cambiarlo significherebbe rifare
+    sei ore di fedelta' al primo rilancio, senza che nessuno se ne accorga finche' la GPU
+    non e' occupata.  Il `task` esiste solo per il secondo compito di `shap_tab` (gli array
+    SHAP), che convive con il primo nella stessa cartella.
+    """
+    name = f"DONE.{fp}.json" if task is None else f"DONE.{task}.{fp}.json"
+    return os.path.join(out_dir_for(run_dir, kind), name)
+
+
+def is_done(run_dir, kind, fp, task=None):
+    return os.path.exists(stamp_path(run_dir, kind, fp, task))
+
+
+def mark_done(run_dir, kind, fp, payload=None, task=None):
     """Scritto SOLO a calcolo finito.
 
     E' la ragione per cui l'interruzione e' sicura: una run interrotta a meta' non lascia
     stampigliatura, quindi al riavvio viene rifatta da capo. La granularita' della ripresa
     e' la RUN, non il campione."""
-    p = stamp_path(out_root, run_id, fp)
+    p = stamp_path(run_dir, kind, fp, task)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as f:
-        json.dump({"run_id": run_id, "fingerprint": fp, **(payload or {})}, f, indent=1)
+        json.dump({"run_dir": run_dir, "kind": kind, "task": task or "default",
+                   "fingerprint": fp, **(payload or {})}, f, indent=1)
     return p
 
 
-def out_dir_for(out_root, run_id):
-    """Dove vanno gli artefatti di questa run sotto la radice stratificata."""
-    return os.path.join(out_root, run_id.replace("/", "__"))
+def resume_report(run_dirs, kind, fp, task=None):
+    """(da_fare, gia_fatte) — da stampare PRIMA di lanciare, cosi' si sa cosa costera'.
 
-
-def resume_report(out_root, run_ids, fp):
-    """(da_fare, gia_fatte) — da stampare PRIMA di lanciare, cosi' si sa cosa costera'."""
-    done = [r for r in run_ids if is_done(out_root, r, fp)]
-    todo = [r for r in run_ids if not is_done(out_root, r, fp)]
+    `run_dirs` e' un dict {run_id: run_dir} (o un iterabile di coppie): la ripresa e' per
+    run, e le chiavi tornano indietro cosi' che il chiamante stampi i run_id e non i path.
+    """
+    items = list(run_dirs.items() if hasattr(run_dirs, "items") else run_dirs)
+    done = [rid for rid, d in items if is_done(d, kind, fp, task)]
+    todo = [rid for rid, d in items if not is_done(d, kind, fp, task)]
     return todo, done
+
+
+# Il piano di lavoro: quale motore scrive dove, con quale stampigliatura, e quanto costa.
+# `sec_per_sample` sono misure, non stime: SHAP 30/07, LORE 01/08 su 8 run (23.2 min a
+# n=48). Grad-CAM e' None finche' non lo si misura sulla prima run.
+JOBS = {
+    "shap":    dict(kind="shap_tab",    task="shap",  engines=("shap",),    sec_per_sample=1.2),
+    "lore":    dict(kind="lore_sa",     task=None,    engines=("lore",),    sec_per_sample=29.0),
+    "gradcam": dict(kind="gradcam_img", task=None,    engines=("gradcam",), sec_per_sample=None),
+}
 
 
 # --------------------------------------------------------------------------------------
@@ -400,3 +472,291 @@ def adopt(validation_df, n=None, balance="pool", seed=0, snapshot_dir=None,
         print(f"           snapshot: {path}")
         print(f"           ripristino del prefisso storico: xs.adopt(validation_df, balance=None)")
     return idx, {**info, "fingerprint": fp, "snapshot": path}
+
+
+# --------------------------------------------------------------------------------------
+# Rendiconto CROSS-RUN — tabelle e figure di confronto fra famiglie
+#
+# Sta qui, e non in una cella del notebook, per la richiesta del 2026-08-01: "voglio che la
+# XAI crei direttamente i plot, non che dobbiamo aggiungere ulteriori celle". I loop della
+# fedelta' e di LORE la chiamano in coda; nessuna cella in piu' da ricordarsi di eseguire.
+#
+# Le figure PER RUN le fanno i motori (`xai_faithfulness._plot_aligned_signed_run`,
+# `xai_lore_sa._plot_lore_sa_run`) dentro la run. Qui ci finisce solo cio' che per
+# definizione non appartiene a una run sola.
+# --------------------------------------------------------------------------------------
+SIGNED_MODES_REPORT = ("posev", "negev", "target")   # `abs` e' il modo-artefatto: ~0, rumore
+Q_CLEAN = 0.20                                       # full budget e' OOD-dominato
+
+
+def _run_gains(run_dir, prefix="faithfulness_aligned_signed", modes=("abs",) + SIGNED_MODES_REPORT):
+    """Tutti i gain di una run, CON le convenzioni di segno gia' applicate.
+
+    Mai dallo scalare del JSON: `faithfulness_tabular_del_gain` e' PRE-convenzione
+    (`negev` va negato, `target` firmato per campione prima della media). Si passa dagli
+    npz, che portano dentro anche le `labels` — quindi non serve validation_df.
+    """
+    from . import xai_faithfulness as xf
+    d = out_dir_for(run_dir, "shap_tab")
+    rec = {}
+    for mode in modes:
+        p = os.path.join(d, f"{prefix}_{mode}_curves.npz")
+        if not os.path.exists(p):
+            return None
+        with np.load(p) as z:
+            labels = z["labels"]; sgn = xf.mode_sign(mode, labels)
+            rec["n"] = len(labels); rec["pos_rate"] = float(labels.mean())
+            for direction in ("del", "ins"):
+                g = xf.persample_gains(z, "tabular", direction, q_max=None)
+                rec[f"{mode}_{direction}"] = float(np.mean(g * sgn))
+                gq = xf.persample_gains(z, "tabular", direction, q_max=Q_CLEAN)
+                rec[f"{mode}_{direction}_q{int(Q_CLEAN * 100)}norm"] = (
+                    float(np.mean(gq * sgn)) / xf.gain_window(z, Q_CLEAN))
+    return rec
+
+
+def _lore_quality(run_dir):
+    """Qualita' LORE-SA di una run, con la scomposizione per classe.
+
+    `*_5050` = media delle due medie di classe. E' la colonna da citare quando il campione
+    non e' bilanciato: neutralizza la composizione senza buttare via campioni.
+    """
+    import glob as _glob
+    import pandas as pd
+    hits = sorted(_glob.glob(os.path.join(out_dir_for(run_dir, "lore_sa"), "epoch*",
+                                          "lore_sa_persample_*.csv")))
+    if not hits:
+        return None
+    d = pd.read_csv(hits[-1])
+    d["covf"] = (d.neigh_n_classes > 1).astype(float)
+    g = d.groupby("true_label").agg(c=("covf", "mean"), r=("rule_len", "mean"))
+    return dict(n=len(d), pos_rate=float(d.true_label.mean()),
+                n_pos=int(d.true_label.sum()), n_neg=int((1 - d.true_label).sum()),
+                lore_coverage=d["covf"].mean(), lore_coverage_5050=g["c"].mean(),
+                rule_len=d["rule_len"].mean(), rule_len_5050=g["r"].mean(),
+                cov_y0=g["c"].get(0, np.nan), cov_y1=g["c"].get(1, np.nan),
+                rl_y0=g["r"].get(0, np.nan), rl_y1=g["r"].get(1, np.nan),
+                neigh_pos_rate=d["neigh_pos_rate"].mean(),
+                fid_insample=d["fid_insample"].mean(),
+                n_warning=int(d.warning.notna().sum()), n_error=int(d.error.notna().sum()))
+
+
+def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag="",
+           out_dir=None, verbose=True, encoded_feature_names=None, lore_idx=None,
+           shape_metrics=True):
+    """Tabelle + figure di confronto fra famiglie, dagli artefatti gia' su disco. Zero GPU.
+
+    `master`  il DataFrame di `master_results_rows.csv` (colonne impl_name, setting_tag,
+              seed, run_id, run_dir).
+    `central` {impl_name: setting_tag} dei setting rappresentativi. **Serve**: il master
+              ha 45 righe di `fixed_scaling`, `a0p000` (degenere, tutti zeri) compresa, e
+              un `groupby("impl_name")` secco le mescola tutte nella media di famiglia.
+              None = si usano tutte le run, e viene stampato l'avviso.
+    `tag`     forza il suffisso dei file. Default: derivato dall'`n` dei dati di ciascun
+              kind (`_n144` per la fedelta', `_n48` per LORE), cosi' i due non possono
+              etichettarsi con l'n dell'altro.
+    """
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    from .xai_engines import _finalize_plot
+
+    out_dir = out_dir or os.path.join(art_path, "runs", AGGREGATE_DIRNAME)
+    os.makedirs(out_dir, exist_ok=True)
+
+    def _sfx(df):
+        """Suffisso DERIVATO dai dati, non dal chiamante.
+
+        `shap_tab` e `lore_sa` girano su n diversi (144 e 48): un `tag` unico passato da
+        fuori ne etichetta uno dei due con l'n dell'altro, e il file sbagliato resta su
+        disco quando il prossimo giro scrive col nome giusto. Se l'n non e' unico fra le
+        run si torna al `tag` del chiamante, che almeno non mente su un valore singolo.
+        """
+        if tag:
+            return f"_{tag}"
+        ns = sorted(set(int(v) for v in df["n"])) if len(df) else []
+        return f"_n{ns[0]}" if len(ns) == 1 else ""
+    # il master porta i path della macchina su cui e' stato scritto: si riancora su art_path
+    rd = {r.run_id: os.path.join(art_path, str(r.run_dir).split("artifacts/enhanced/")[-1])
+          for _, r in master.iterrows()}
+    written, out = [], {}
+
+    if "shap_tab" in kinds:
+        rows = []
+        for _, r in master.iterrows():
+            rec = _run_gains(rd[r.run_id])
+            if rec is not None:
+                rows.append(dict(impl_name=r.impl_name, setting_tag=r.setting_tag,
+                                 seed=r.seed, run_id=r.run_id, **rec))
+        faith = pd.DataFrame(rows)
+        out["faith"] = faith
+        if len(faith):
+            sfx = _sfx(faith)
+            p = os.path.join(out_dir, f"faithfulness_aligned_signed{sfx}.csv")
+            faith.to_csv(p, index=False); written.append(p)
+            if central:
+                sel = faith[[central.get(i) == t
+                             for i, t in zip(faith.impl_name, faith.setting_tag)]]
+            else:
+                sel = faith
+                if verbose:
+                    print("  ⚠ central=None: la media di famiglia include TUTTI i setting, "
+                          "anche quelli degeneri")
+            col = f"target_del_q{int(Q_CLEAN * 100)}norm"
+            order = sel.groupby("impl_name")[col].mean().sort_values().index.tolist()
+            out["central"], out["order"] = sel, order
+
+            cmap = dict(zip(order, plt.cm.viridis(np.linspace(.05, .85, len(order)))))
+            fig, axes = plt.subplots(1, len(SIGNED_MODES_REPORT),
+                                     figsize=(4.2 * len(SIGNED_MODES_REPORT), 4.4),
+                                     sharey=True, squeeze=False)
+            for ax, mo in zip(axes[0], SIGNED_MODES_REPORT):
+                c = f"{mo}_del_q{int(Q_CLEAN * 100)}norm"
+                for x, fam in enumerate(order):
+                    v = sel.loc[sel.impl_name == fam, c].values
+                    ax.scatter(np.full(len(v), x) + np.linspace(-.12, .12, max(len(v), 1)),
+                               v, s=22, color=cmap[fam], alpha=.75, zorder=3)
+                    if len(v):
+                        ax.hlines(v.mean(), x - .3, x + .3, color=cmap[fam], lw=2.5, zorder=4)
+                ax.set_xticks(range(len(order)))
+                ax.set_xticklabels([f.replace("_", "\n") for f in order], fontsize=8)
+                ax.set_title(f"`{mo}`"); ax.grid(axis="y", alpha=.25)
+            axes[0][0].set_ylabel(f"deletion gain_norm (q$\\leq${Q_CLEAN})")
+            n_seed = sel.groupby("impl_name").size().min() if len(sel) else 0
+            fig.suptitle(f"Fedelta' tabellare allineata — {len(sel)} run, "
+                         f"{sel.impl_name.nunique()} famiglie, min {n_seed} seed", y=1.0)
+            _finalize_plot(out_dir, f"faithfulness_by_family{sfx}.png")
+            written.append(os.path.join(out_dir, f"faithfulness_by_family{sfx}.png"))
+
+    if "lore_sa" in kinds:
+        rows = []
+        for _, r in master.iterrows():
+            rec = _lore_quality(rd[r.run_id])
+            if rec is not None:
+                rows.append(dict(impl_name=r.impl_name, setting_tag=r.setting_tag,
+                                 seed=r.seed, run_id=r.run_id, **rec))
+        lore = pd.DataFrame(rows)
+        # Le run LORE possono avere lo STESSO n ma campioni diversi (il 01/08 `vanilla` ne
+        # aveva tre a n=48, una sul prefisso dei 144 e due sul campione bilanciato). Se la
+        # prevalenza non e' unica, la media di famiglia mescola popolazioni diverse.
+        if len(lore) and "pos_rate" in lore:
+            for _f, _g in lore.groupby("impl_name"):
+                if _g.pos_rate.round(3).nunique() > 1 and verbose:
+                    print(f"  ⚠ {_f}: run LORE su campioni DIVERSI "
+                          f"(pos_rate {sorted(_g.pos_rate.round(3).unique())}) — "
+                          f"la media di famiglia mescola popolazioni, rifare le vecchie")
+        out["lore"] = lore
+        if len(lore):
+            sfx = _sfx(lore)
+            p = os.path.join(out_dir, f"lore_sa_quality{sfx}.csv")
+            lore.to_csv(p, index=False); written.append(p)
+            lo = lore.groupby("impl_name")[["lore_coverage", "lore_coverage_5050",
+                                            "rule_len", "rule_len_5050"]].mean()
+            lo = lo.reindex([f for f in out.get("order", lo.index) if f in lo.index])
+            fig, axes = plt.subplots(1, 2, figsize=(11, 4.4))
+            for ax, (raw, bal, name) in zip(axes, [
+                    ("lore_coverage", "lore_coverage_5050", "lore_coverage"),
+                    ("rule_len", "rule_len_5050", "rule_len")]):
+                x = np.arange(len(lo))
+                ax.bar(x - .2, lo[raw], .4, color="#b0b0b0",
+                       label=f"grezzo (pos_rate {lore.pos_rate.mean():.2f})")
+                ax.bar(x + .2, lo[bal], .4, color="#2b7bba", label="riponderato 50/50")
+                ax.set_xticks(x)
+                ax.set_xticklabels([f.replace("_", "\n") for f in lo.index], fontsize=8)
+                ax.set_title(name); ax.legend(fontsize=8); ax.grid(axis="y", alpha=.25)
+            unbal = abs(lore.pos_rate.mean() - .5) > .05
+            fig.suptitle("LORE-SA per famiglia" + (
+                f" — ⚠ campione SBILANCIATO ({int(lore.n_pos.mean())} pos / "
+                f"{int(lore.n_neg.mean())} neg): ordinamento si', livelli no" if unbal
+                else " — campione bilanciato"), y=1.0)
+            _finalize_plot(out_dir, f"lore_sa_quality{sfx}.png")
+            written.append(os.path.join(out_dir, f"lore_sa_quality{sfx}.png"))
+
+    # ---- metriche di FORMA che sono CROSS-RUN per natura --------------------------------
+    # Compattezza e rule compactness le scrivono i motori mentre calcolano (`ShapCallback`,
+    # `LoreSACallback`).  Queste due no, e non possono: la stabilita' confronta DUE run e
+    # l'accordo SHAP<->LORE ne incrocia due explainer.  Girano qui, in coda ai loop, che e'
+    # il primo momento in cui tutte le run esistono.
+    if shape_metrics and encoded_feature_names is not None:
+        from . import xai_metrics as xmet
+        shape = xmet.collect(master, art_path,
+                             encoded_feature_names=encoded_feature_names, lore_idx=lore_idx)
+        stab = xmet.stability_table(master, art_path, encoded_feature_names)
+        for df, name in ((shape, "xai_shape_metrics.csv"), (stab, "xai_stability.csv")):
+            if len(df):
+                p = os.path.join(out_dir, name)
+                df.to_csv(p, index=False)
+                written.append(p)
+        out["shape"], out["stability"] = shape, stab
+        out["by_family"] = xmet.summary_by_family(art_path, shape_df=shape, stab_df=stab,
+                                                  central=central, out_dir=out_dir,
+                                                  verbose=False)
+        written.append(os.path.join(out_dir, "xai_summary_by_family.csv"))
+
+    if verbose:
+        print(f"[report] {len(written)} file in {out_dir}")
+        for p in written:
+            print("   ", os.path.basename(p))
+    out["written"] = written
+    return out
+
+
+def sample_matches(run_dir, kind, expected_idx):
+    """Gli artefatti di `kind` sono stati calcolati SU QUESTI campioni?  (True/False/None)
+
+    L'impronta nella stampigliatura identifica il campione-PADRE (le 144 lesioni), non il
+    sottoinsieme che un motore ha davvero spiegato.  LORE ne spiega 48: il 31/07 erano i
+    primi 48 dei 144 ordinati (35 pos / 13 neg), dal 01/08 sono 24+24 espliciti.  Stessa
+    impronta, due campioni diversi — quindi "gia' fatto" da solo non basta, o il rifacimento
+    salterebbe proprio le run che vanno rifatte.
+
+    Ritorna ``None`` quando l'artefatto non registra quali righe ha spiegato (tutti quelli
+    prodotti prima che `val_index` esistesse): "non lo so" e' un'informazione diversa da
+    "non corrisponde", e chi chiama decide se rifare.
+    """
+    import glob as _glob
+    exp = np.asarray(expected_idx, int)
+    d = out_dir_for(run_dir, kind)
+    if kind == "lore_sa":
+        hits = sorted(_glob.glob(os.path.join(d, "epoch*", "lore_sa_persample_*.csv")))
+        if not hits:
+            return None
+        import pandas as pd
+        df = pd.read_csv(hits[-1])
+        if "val_index" not in df.columns:
+            return None
+        got = df["val_index"].to_numpy()
+    elif kind == "shap_tab":
+        hits = sorted(_glob.glob(os.path.join(d, "epoch_*", "shap_arrays_epoch_*.npz")))
+        if not hits:
+            return None
+        with np.load(hits[-1]) as z:
+            got = np.asarray(z["explained_indices"], int).ravel()
+    elif kind == "gradcam_img":
+        hits = sorted(_glob.glob(os.path.join(d, "gradcam_arrays*_epoch_*.npz")))
+        if not hits:
+            return None
+        with np.load(hits[-1]) as z:
+            if "val_index" not in z.files:
+                return None
+            got = np.asarray(z["val_index"], int).ravel()
+    else:
+        return None
+    return len(got) == len(exp) and bool(np.array_equal(np.sort(got), np.sort(exp)))
+
+
+def resume_verified(run_dirs, kind, fp, expected_idx, task=None):
+    """Come `resume_report`, ma "fatto" significa **fatto su QUESTO campione**.
+
+    Ritorna ``(todo, done, da_rifare)``: le run stampigliate ma su campioni diversi (o su
+    campioni non registrati) finiscono in `da_rifare`, non in `done`.  E' la differenza fra
+    "non rifare cio' che e' fatto" e "non rifare niente".
+    """
+    items = list(run_dirs.items() if hasattr(run_dirs, "items") else run_dirs)
+    todo, done, redo = [], [], []
+    for rid, d in items:
+        if not is_done(d, kind, fp, task):
+            todo.append(rid)
+            continue
+        ok = sample_matches(d, kind, expected_idx)
+        (done if ok is True else redo).append(rid)
+    return todo, done, redo

@@ -226,15 +226,20 @@ def plot_shap_scatter_top4_numeric(
 # --------------------------------------------------------------------------------------
 
 def aggregate_raw_importance(encoded_feature_names, mean_abs_vec):
+    """Somma le dimensioni encoded sulla feature RAW da cui vengono.
+
+    La mappatura sta in `xai_metrics.raw_name_for`, un posto solo. Qui c'era
+    `name.startswith("age_approx_bin_")` scritto a mano: su ISIC24 e' equivalente (l'unica
+    feature discretizzata e' `age_approx`), ma il notebook costruisce i nomi con
+    `f"{name}_bin_{b}"` per OGNI `Discretization`. Su un dataset con una seconda feature
+    discretizzata questa funzione avrebbe mappato `foo_bin_0` sul raw `"foo_bin_0"` invece
+    che su `"foo"` — in silenzio, e in disaccordo con `encoded_indices_for_raw` qui sopra,
+    che il `_bin_` lo gestisce generico. Trovato il 2026-08-01.
+    """
+    from .xai_metrics import raw_name_for
     agg = {}
     for j, val in enumerate(mean_abs_vec):
-        name = encoded_feature_names[j]
-        if "__" in name:
-            raw = name.split("__", 1)[0]
-        elif name.startswith("age_approx_bin_"):
-            raw = "age_approx"
-        else:
-            raw = name
+        raw = raw_name_for(encoded_feature_names[j])
         agg.setdefault(raw, 0.0)
         agg[raw] += float(abs(val))
     return agg
@@ -610,6 +615,14 @@ class ShapCallback(Callback):
         top1_share = float(mean_abs_all.max() / (total_abs + 1e-12))
         top5_share = float(np.sort(mean_abs_all)[::-1][:5].sum() / (total_abs + 1e-12))
 
+        # Metriche di FORMA (leggibilita'): compattezza per entropia e k90 sparsity, dalle
+        # stesse attribuzioni che sono gia' in memoria. Escono qui, con tutto il resto,
+        # invece che da una cella da lanciare dopo. Sono un COMPLEMENTO: `shap_mass` accanto
+        # dice se c'e' qualcosa da spiegare — con il ramo tabellare spento la compattezza
+        # sarebbe 1.000 (il massimo) e `xai_metrics` la mette a NaN apposta.
+        from .xai_metrics import shap_shape_from_values
+        shape = shap_shape_from_values(shap_vals, stats["explained_indices"])
+
         shap_csv = self.base_dir / "shap_summary.csv"
         append_epoch_row(shap_csv, {
             "epoch": int(epoch), "total_abs_shap": total_abs,
@@ -617,6 +630,9 @@ class ShapCallback(Callback):
             "n_explained": int(shap_vals.shape[0]),
             "n_pos": int((preds[:, 0] >= self.positive_threshold).sum()),
             "n_neg": int((preds[:, 0] <  self.positive_threshold).sum()),
+            **{k: v for k, v in shape.items()
+               if k in ("shap_compactness", "shap_k90", "shap_k90_sparsity",
+                        "shap_mass", "frac_zero_shap", "branch_off")},
         })
 
         # 1) grouped barplot: global vs pos vs neg (top-k)
@@ -741,17 +757,28 @@ class MultiModalGradCAMEngine:
         # --- CAMs (B, Hc, Wc) ---
         cams = self._generate_cams(conv_out, grads)  # list of (Hc, Wc)
         cams = np.stack(cams, axis=0)
+        # Le heatmap GREZZE, esposte perche' il callback possa SALVARLE. Fino al 01/08 questa
+        # funzione restituiva solo il collage RGB: le uniche tracce del lato immagine erano
+        # 106 PNG con la colormap gia' applicata, e da li' non si ricava nessuna metrica
+        # (entropia, area attivata, componenti connesse, IoU fra configurazioni). Non e' nel
+        # valore di ritorno per non rompere i chiamanti che spacchettano tre elementi.
+        self.last_cams = cams
+        self.last_preds = preds.numpy() if isinstance(preds, tf.Tensor) else preds
 
         # --- Triptychs with display images ---
         triptychs = []
-        preds_np = preds.numpy() if isinstance(preds, tf.Tensor) else preds
-        for i in range(images.shape[0]):
+        preds_np = self.last_preds
+        # Il collage cresce come il batch: a n=144 sarebbe un PNG enorme che nessuno guarda,
+        # e comporlo costa piu' del Grad-CAM stesso. Oltre `max_grid` si salvano solo gli
+        # array, che sono il pezzo che serve.
+        n_vis = min(images.shape[0], int(getattr(self, "max_grid", 8)))
+        for i in range(n_vis):
             pred_text = self._format_pred_text(preds_np[i])
             vis_img = images[i]
             trip = self._compose_triptych(vis_img, cams[i], pred_text)
             triptychs.append(trip)
 
-        grid = self._make_grid(triptychs)
+        grid = self._make_grid(triptychs) if triptychs else np.zeros((1, 1, 3))
         return grid, triptychs, preds_np
 
     # ------------------------ Saving helpers ------------------------
@@ -956,30 +983,125 @@ class MultiModalGradCAMEngine:
 
 class MultiModalGradCAMCallback(Callback):
     def __init__(self, engine, probe_batch, class_index=0, layer_name=None,
-                 save_dir=None, tag="GradCAM/grid"):
+                 save_dir=None, tag="GradCAM/grid", subset_idx=None,
+                 subset_fingerprint=None, modes=None, batch_size=None):
         super().__init__()
         self.engine = engine
         self.probe_batch = probe_batch
         self.class_index = class_index
         self.layer_name = layer_name
         self.tag = tag
+        # DUE MODI, uno stesso caricamento. `image_only` azzera le feature tabellari e
+        # chiede "dove guarderebbe SENZA il tabellare"; `context` usa le feature vere e
+        # chiede "dove guarda davvero". Per uno studio sull'attendance servono entrambi, e
+        # la loro DIFFERENZA (IoU fra le due maschere) e' essa stessa un segnale: quanto il
+        # ramo tabellare sposta l'attenzione visiva.
+        #
+        # Costano poco insieme perche' il caro e' altrove: caricare il checkpoint e leggere
+        # il dataset fino alle 144 lesioni si paga UNA volta per run, il passo di gradiente
+        # e' l'unica cosa che raddoppia.
+        #
+        # `modes=None` = comportamento storico: un modo solo, quello del motore.
+        self.modes = tuple(modes) if modes else (engine.mode,)
+        # Le POSIZIONI in validation_df delle immagini nel probe batch, e l'impronta del
+        # campione. Servono a rendere le heatmap riallineabili con SHAP e LORE: fino al
+        # 01/08 Grad-CAM girava sulle prime 8 righe e non lasciava traccia di quali fossero.
+        self.subset_idx = subset_idx
+        self.subset_fingerprint = subset_fingerprint
+        # Quante immagini per passo di gradiente. None = tutte insieme (comportamento
+        # storico, che a n=8 andava bene e a n=144 esaurisce la GPU).
+        self.batch_size = batch_size
         self.save_dir = Path(save_dir) if save_dir else None
         if self.save_dir:
             self.save_dir.mkdir(parents=True, exist_ok=True)
 
     def on_epoch_end(self, epoch, logs=None):
-        grid, _, _ = self.engine.explain(
-            validation_data=self.probe_batch,
-            model=self.model,
-            class_index=self.class_index,
-            layer_name=self.layer_name,
-        )
+        from .xai_metrics import gradcam_shape_from_cams, cam_masks, cam_mode_contrast
+        single = len(self.modes) == 1
+        by_mode, preds_by_mode = {}, {}
 
-        # Disk (PNG)
-        if self.save_dir:
+        for mode in self.modes:
+            self.engine.mode = mode
+            # A CHUNK, non tutto insieme. Con 144 immagini in un solo `GradientTape` e i
+            # guided gradients servono ~22 GiB solo di attivazioni (misurato 01/08:
+            # ResourceExhaustedError su un tensore (144, 8, 8, 1248) con 23.9 GiB di GPU).
+            # Grad-CAM e' per campione: non c'e' nessuna dipendenza fra immagini, quindi
+            # spezzare il batch da' lo STESSO risultato con memoria costante.
+            xb, yb = self.probe_batch
+            n_tot = int(len(next(iter(xb.values()))))
+            step = max(1, int(self.batch_size or n_tot))
+            cams_parts, preds_parts, grid = [], [], None
+            for start in range(0, n_tot, step):
+                sl = slice(start, min(start + step, n_tot))
+                g, _, p = self.engine.explain(
+                    validation_data=({k: v[sl] for k, v in xb.items()}, yb[sl]),
+                    model=self.model,
+                    class_index=self.class_index,
+                    layer_name=self.layer_name,
+                )
+                cams_parts.append(np.asarray(self.engine.last_cams))
+                preds_parts.append(np.asarray(p))
+                if grid is None:
+                    grid = g          # il collage viene dal primo chunk: e' un'anteprima
+            self.engine.last_cams = np.concatenate(cams_parts, axis=0)
+            preds = np.concatenate(preds_parts, axis=0)
+            if not self.save_dir:
+                continue
+            # Nome storico con un modo solo (`epoch_003.png`), suffissato con due: le run
+            # canoniche restano leggibili dagli script che le cercano per quel nome.
+            sfx = "" if single else f"_{mode}"
             out = (np.clip(grid, 0, 1) * 255).astype(np.uint8)
-            cv2.imwrite(str(self.save_dir / f"epoch_{epoch:03d}.png"),
+            cv2.imwrite(str(self.save_dir / f"epoch_{epoch:03d}{sfx}.png"),
                         cv2.cvtColor(out, cv2.COLOR_RGB2BGR))
+
+            cams = getattr(self.engine, "last_cams", None)
+            if cams is None:
+                continue
+            by_mode[mode] = np.asarray(cams, np.float32)
+            preds_by_mode[mode] = np.asarray(preds, np.float32).reshape(len(cams), -1)
+
+            # LE HEATMAP GREZZE: precondizione di ogni metrica sul lato immagine. Da un PNG
+            # con la colormap applicata non si ricava ne' entropia ne' area ne' IoU.
+            # `val_index` le accompagna per lo stesso motivo per cui accompagna le regole
+            # LORE: senza, non si sa QUALI lesioni sono state spiegate.
+            np.savez_compressed(
+                self.save_dir / f"gradcam_arrays{sfx}_epoch_{epoch:03d}.npz",
+                cams=by_mode[mode], preds=np.asarray(preds, np.float32), mode=mode,
+                **({} if self.subset_idx is None
+                   else {"val_index": np.asarray(self.subset_idx, int)[:len(cams)]}),
+                **({} if self.subset_fingerprint is None
+                   else {"subset_fingerprint": str(self.subset_fingerprint)}))
+
+            # Le metriche vanno nella TABELLA e basta. La figura per-run che c'era qui
+            # (heatmap media, frazione sopra soglia, bar chart delle metriche) e' stata
+            # tolta il 01/08: le prime due non dicono niente e la terza duplica in
+            # pixel una riga di CSV. Su 110 run x 2 modi erano 220 PNG di ingombro.
+            shape = gradcam_shape_from_cams(by_mode[mode])
+            append_epoch_row(self.save_dir / "gradcam_summary.csv",
+                             {"epoch_mode": f"{epoch:03d}:{mode}", "epoch": int(epoch),
+                              "mode": mode, "n_cams": int(len(cams)), **shape},
+                             key="epoch_mode")   # <- due righe per epoca: la chiave e' la coppia
+
+        # Il segnale che nasce dall'avere ENTRAMBI: quanto il ramo tabellare sposta
+        # l'attenzione visiva. IoU 1.0 = il tabellare non cambia dove il modello guarda.
+        #
+        # ⚠️ LA IoU DA SOLA NON BASTA, ed e' il motivo per cui questa riga usciva quasi
+        # vuota. Su cinque famiglie su sei la testa e' `Dense(1)` su una `Concatenate`,
+        # quindi il logit e' ADDITIVO nei due rami e d(logit)/d(conv_out) non dipende
+        # affatto dalle feature: la heatmap e' identica per costruzione, non per risultato,
+        # e la IoU vale 1.000 ovunque. Intanto la PREDIZIONE cambia fino a 0.53 — cioe' la
+        # riga di confronto diceva «non e' successo niente» proprio mentre l'unica cosa che
+        # si muoveva non era registrata da nessuna parte. Ora la riga porta anche la
+        # differenza sulle heatmap grezze e quella sulle predizioni.
+        if self.save_dir and {"image_only", "context"} <= set(by_mode):
+            contrast = cam_mode_contrast(by_mode["context"], by_mode["image_only"],
+                                         preds_by_mode.get("context"),
+                                         preds_by_mode.get("image_only"))
+            append_epoch_row(self.save_dir / "gradcam_summary.csv",
+                             {"epoch_mode": f"{epoch:03d}:context_vs_image_only",
+                              "epoch": int(epoch), "mode": "context_vs_image_only",
+                              "n_cams": int(len(by_mode["context"])), **contrast},
+                             key="epoch_mode")
 
 
 # --------------------------------------------------------------------------------------

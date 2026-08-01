@@ -570,11 +570,24 @@ def _load_shap_values(run_dir, best_epoch, model, raw_df, imgs):
     l'assenza di stampigliatura e' un ERRORE, non un avviso: tutti gli npz canonici sono
     senza, e sono esattamente quelli che non vanno riusati fuori dal prefisso.
     """
-    shap_dir = os.path.join(run_dir, "xai", "shap")
+    # DOVE cercare: con un campione adottato gli array giusti stanno in `xai/shap_tab/`
+    # (li scrive `ShapCallback` sotto lo stesso campione); `xai/shap/` tiene i canonici di
+    # giugno, che sono sul PREFISSO e senza stampigliatura — cioe' esattamente quelli che il
+    # guard qui sotto deve rifiutare. Cercare solo li' significava rifiutare sempre, anche
+    # dopo aver rigenerato SHAP correttamente. La scelta della cartella e' di `xai_driver`,
+    # in un posto solo, cosi' scrittura / protezione / lettura non possono divergere.
+    from .xai_driver import shap_subdir
+    shap_dir = os.path.join(run_dir, "xai", shap_subdir())
     cand = os.path.join(shap_dir, f"epoch_{int(best_epoch):03d}",
                         f"shap_arrays_epoch_{int(best_epoch):03d}.npz")
     if not os.path.exists(cand):
         hits = sorted(glob.glob(os.path.join(shap_dir, "epoch_*", "shap_arrays_epoch_*.npz")))
+        cand = hits[-1] if hits else None
+    if cand is None and shap_dir.endswith("shap_tab"):
+        # niente ancora sul campione: si ricade sul canonico, che il guard rifiutera' con
+        # il messaggio giusto invece di far finta che SHAP non esista e ricalcolarlo.
+        hits = sorted(glob.glob(os.path.join(run_dir, "xai", "shap", "epoch_*",
+                                             "shap_arrays_epoch_*.npz")))
         cand = hits[-1] if hits else None
     if cand is not None and os.path.exists(cand) and globals().get("EVAL_IS_CANONICAL", True):
         d = np.load(cand)
@@ -882,7 +895,35 @@ def explanation_faithfulness(model, run_dir, best_epoch, n_samples=None, budgets
 
     if save:
         fdir = out_dir or os.path.join(run_dir, "xai", "faithfulness")
+        # GUARD — non scrivere un artefatto calcolato su un campione adottato dentro
+        # `xai/faithfulness/`, che e' la cartella dei numeri PUBBLICATI (prefisso storico).
+        # `xs.adopt()` imposta il globale FAITH_SUBSET_IDX e `_build_faith_subset` ci ricade
+        # a ogni `subset_idx=None`: il loop post-hoc, che passa out_dir=None e
+        # out_name="faithfulness", sovrascriverebbe il canonico con numeri di un altro
+        # campione, senza errore e con valori plausibili.
+        #
+        # 2026-08-01: il guard NON e' piu' "out_dir deve stare fuori dalle run". Gli
+        # artefatti del campione vivono ora dentro la run, in `xai/shap_tab/`
+        # (`xai_subset.out_dir_for`), quindi la condizione si e' spostata su cosa e' la
+        # cartella di destinazione — che e' anche piu' robusta di prima: adesso becca anche
+        # chi passa `out_dir=<run>/xai/faithfulness` a mano.
+        if FAITH_SUBSET_IDX is not None and os.path.basename(
+                os.path.normpath(fdir)) == "faithfulness":
+            raise RuntimeError(
+                f"\n  SUBSET GUARD: un campione XAI e' adottato in questa sessione "
+                f"(n={len(FAITH_SUBSET_IDX)}, impronta {ACTIVE_SUBSET_FINGERPRINT}),\n"
+                f"  ma questa chiamata scriverebbe '{out_name}' nella cartella dei numeri "
+                f"PUBBLICATI:\n"
+                f"    {fdir}\n"
+                f"  I numeri sarebbero di un campione diverso da quello pubblicato.\n"
+                f"  Rimedi: out_dir=xs.out_dir_for(run_dir, 'shap_tab'), oppure disarmare\n"
+                f"  il campione con xs.adopt(validation_df, balance=None).")
         os.makedirs(fdir, exist_ok=True)
+        # Traccia del campione dentro l'artefatto stesso: un npz senza questa chiave e' del
+        # prefisso storico, e non c'e' altro modo di distinguerli a posteriori.
+        _eff_subset = subset_idx if subset_idx is not None else FAITH_SUBSET_IDX
+        results["subset_fingerprint"] = ACTIVE_SUBSET_FINGERPRINT
+        results["n_subset"] = int(len(_eff_subset)) if _eff_subset is not None else None
         np.savez_compressed(os.path.join(fdir, f"{out_name}_curves.npz"), **npz)
         with open(os.path.join(fdir, f"{out_name}.json"), "w") as f:
             json.dump({**results, "curves": curves_json, "q_grid": q_grid.tolist()}, f, indent=2)
@@ -1136,13 +1177,26 @@ def aligned_signed_faithfulness(model, run_dir, best_epoch, phi=None, labels=Non
                                 background="baseline", out_dir=None,
                                 out_prefix="faithfulness_aligned_signed",
                                 save=True, verbose=True, q_maxes=(0.20,),
-                                subset_idx=None, n_samples=None, **kw):
+                                subset_idx=None, n_samples=None,
+                                allow_clobber=False, **kw):
     """Deletion + insertion under each sign convention, from ONE attribution pass.
 
-    Writes to `out_prefix`-named files so nothing touches the canonical
-    `faithfulness.json` / `faithfulness_curves.npz` or the published
-    `faithfulness_aligned_attr.csv`.
+    Scrive in `<run_dir>/xai/shap_tab/` — cartella propria, dentro la run, che nessun
+    motore canonico tocca. Nomi `out_prefix`-ati, quindi non sfiora `faithfulness.json` /
+    `faithfulness_curves.npz` ne' `faithfulness_aligned_attr.csv`.
+
+    Produce anche la FIGURA per-run (`plots/`): e' il motore a farla, non una cella a valle.
     """
+    from . import xai_subset as _xs
+    if out_dir is None:
+        out_dir = _xs.out_dir_for(run_dir, "shap_tab")
+        # Il write guard vale anche qui, ora che si scrive DENTRO la run: rieseguire su una
+        # run che ha gia' `xai/shap_tab/` la sovrascriverebbe. Solo sulla destinazione di
+        # default — con `out_dir` esplicito (la sonda, i confronti) la scrittura e' altrove
+        # e non c'e' niente da proteggere.
+        if save:
+            from . import xai_driver as _xd
+            _xd.assert_writable(run_dir, engines=("shap_tab",), allow_clobber=allow_clobber)
     # `subset_idx` deve arrivare a ENTRAMBI i passi: le attribuzioni si calcolano su queste
     # righe e la perturbazione deve girare sulle STESSE. Prima non era un parametro, quindi
     # passarlo solo in **kw dava attribuzioni sul prefisso e cancellazioni sul campione
@@ -1217,7 +1271,43 @@ def aligned_signed_faithfulness(model, run_dir, best_epoch, phi=None, labels=Non
             shown = f"{g:+.4f}" if g is not None else "n/a"
             print(f"  {mode:7s} {key.replace(f'aligned_{mode}_', ''):24s} = {shown}"
                   f"   (n_eff mean {np.mean(n_eff):.1f})", flush=True)
+    if save:
+        _write_aligned_signed_summary(out_dir, out_prefix, modes, labels)
     return results, phi
+
+
+def _write_aligned_signed_summary(out_dir, out_prefix, modes, labels):
+    """UNA riga per modo, in un CSV leggibile — il gemello di `shap_summary.csv`.
+
+    Prima qui c'era una figura delle curve, per ogni run. Su 110 run erano 110 PNG che
+    nessuno apre e 34 MB, e le curve di UNA run non si confrontano con niente: il confronto
+    fra famiglie lo fa `xs.report()`. Quello che serve per run e' invece un punto d'ingresso
+    leggibile senza aprire quattro JSON — che e' esattamente cio' che `xai/shap/` aveva e
+    `xai/shap_tab/` no.
+
+    I gain sono RICALCOLATI dalle curve con `mode_sign` + `persample_gains`: mai letti dallo
+    scalare grezzo del JSON, che e' PRE-convenzione di segno.
+    """
+    import pandas as pd
+    rows = []
+    for mode in modes:
+        p = os.path.join(out_dir, f"{out_prefix}_{mode}_curves.npz")
+        if not os.path.exists(p):
+            continue
+        with np.load(p) as z:
+            sgn = mode_sign(mode, labels)
+            rec = {"mode": mode, "n": int(len(z["labels"])),
+                   "pos_rate": float(np.mean(z["labels"]))}
+            for direction in ("del", "ins"):
+                g = persample_gains(z, "tabular", direction, q_max=None)
+                rec[f"{direction}_gain"] = float(np.mean(g * sgn))
+                gq = persample_gains(z, "tabular", direction, q_max=0.20)
+                rec[f"{direction}_gain_q20norm"] = (float(np.mean(gq * sgn))
+                                                    / gain_window(z, 0.20))
+            rows.append(rec)
+    if rows:
+        pd.DataFrame(rows).to_csv(
+            os.path.join(out_dir, "faithfulness_summary.csv"), index=False)
 
 
 def check_efficiency(model, raw_df, imgs, phi, tol=0.05):

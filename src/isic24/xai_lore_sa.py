@@ -549,15 +549,33 @@ def _lore_sa_callback_cls():
             from .xai_engines import append_epoch_row
             np.random.seed(self.rng_seed)
             epoch_name = f"epoch{epoch:03d}"
-            out_dir = self.base_dir / epoch_name / "tabular_sa"
+            # `base_dir` e' gia' `<run_dir>/xai/lore_sa/` (2026-08-01): il livello
+            # `tabular_sa/` che c'era qui sotto distingueva questo motore dal legacy quando
+            # i due condividevano `xai/lore/`, e ora e' ridondante.
+            out_dir = self.base_dir / epoch_name
 
             # La directory si crea DOPO il calcolo, non prima: `explain` dura ~20 minuti e
-            # un'interruzione lasciava una `tabular_sa/` vuota che il write guard poi
+            # un'interruzione lasciava una directory vuota che il write guard poi
             # scambiava per un artefatto, bloccando la ri-esecuzione. Il guard ora ignora le
             # dir vuote (`xai_driver._is_artifact`); questo evita di crearle del tutto.
-            stats, df = self._engine.explain(
-                self.model, self._raw_df, self._images, self._labels,
-                max_explain_samples=self.max_explain_samples, verbose=False)
+            # DOVE gira. Il ciclo caldo di LORE non e' la CNN: l'encoder immagine gira UNA
+            # volta per run (`img_enc.predict` su tutti i campioni), poi le ~1000
+            # valutazioni per istanza del vicinato genetico passano solo per la TESTA, una
+            # densa piccola. Il resto — algoritmo genetico, albero di decisione, regole — e'
+            # CPU puro. Quindi LORE occupa la GPU per 23 minuti a run senza usarla quasi:
+            # su una macchina condivisa e' 42 ore di GPU tenuta ferma.
+            #   xai_driver.LORE_SA_DEVICE = "/CPU:0"  la sposta sulla CPU
+            #   None                                   lascia decidere Keras (= GPU se c'e')
+            # NB il modo pulito resta lanciare il processo con CUDA_VISIBLE_DEVICES="":
+            # `tf.device` non sposta le variabili gia' allocate, le copia a ogni chiamata.
+            from . import xai_driver as _xd
+            _dev = getattr(_xd, "LORE_SA_DEVICE", None)
+            import contextlib
+            import tensorflow as _tf
+            with (_tf.device(_dev) if _dev else contextlib.nullcontext()):
+                stats, df = self._engine.explain(
+                    self.model, self._raw_df, self._images, self._labels,
+                    max_explain_samples=self.max_explain_samples, verbose=False)
 
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -567,6 +585,13 @@ def _lore_sa_callback_cls():
                 for _, r in df.iterrows():
                     f.write(f"[inst {int(r['i']):02d}] label={r.get('true_label')} "
                             f"classe_regola={r.get('rule_class')}\n  {r.get('rule_text')}\n\n")
+            # L'indice POSIZIONALE in validation_df di ogni campione spiegato. Senza, la
+            # colonna `i` (posizione dentro il campione LORE) e' l'unica traccia, e coincide
+            # con l'indice vero solo se il campione era il prefisso — cosa che dal 01/08 non
+            # e' piu' vera. Serve a chiunque debba riallineare LORE con SHAP o la fedelta'
+            # (`xai_metrics.shap_lore_agreement`).
+            if self.subset_idx is not None and len(self.subset_idx) >= len(df):
+                df.insert(1, "val_index", np.asarray(self.subset_idx, int)[:len(df)])
             df.to_csv(out_dir / f"lore_sa_persample_{epoch_name}.csv", index=False)
 
             self.last_quality = {
@@ -581,6 +606,17 @@ def _lore_sa_callback_cls():
                 # dei campioni ha un vicinato mono-classe qualunque sia il generatore.
                 "lore_sa_coverage": (1 - stats.get("n_degenerate", 0) / max(1, len(df))),
             }
+            # Metrica di FORMA (leggibilita'), calcolata qui e non da una cella a valle:
+            # `rule_len` normalizzato sul numero di feature, con le regole VUOTE escluse
+            # invece che contate come "compattissime". La formula ingenua
+            # `1 - (|R|-1)/(d-1)` su una regola vuota da' 1.0079 — fuori range e massima,
+            # cioe' il punteggio migliore a chi non ha spiegato niente.
+            from .xai_metrics import lore_shape_from_df
+            _shape = lore_shape_from_df(df, d_raw=len(self.feat_cols)) or {}
+            self.last_quality.update({
+                "lore_sa_rule_compactness": _shape.get("lore_rule_compactness"),
+                "lore_sa_frac_empty_rules": _shape.get("frac_empty_rules"),
+            })
             append_epoch_row(self.base_dir / "lore_sa_per_epoch.csv",
                              {"epoch": int(epoch), **self.last_quality})
 

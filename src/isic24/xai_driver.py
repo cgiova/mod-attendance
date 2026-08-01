@@ -42,6 +42,21 @@ SHAP_KWARGS = dict(
 )
 GRADCAM_KWARGS = dict(use_guided_grads=True, mode="image_only")
 GRADCAM_CB_KWARGS = dict(class_index=0)
+# I DUE MODI di Grad-CAM, girati nello stesso caricamento (2026-08-01).
+#   `image_only`  azzera le feature tabellari -> "dove guarderebbe SENZA il tabellare"
+#   `context`     usa le feature vere         -> "dove guarda davvero"
+# Fino a oggi girava solo `image_only`: con il tabellare spento, cioe' con la fusione
+# disattivata. Per uno studio sull'attendance e' proprio la configurazione che non risponde
+# alla domanda ("il peso della modalita' sposta l'attenzione visiva?"), e la differenza fra
+# i due modi (`cam_iou_modes`) e' essa stessa una misura di quanto il tabellare la sposta.
+# None = un modo solo, quello di GRADCAM_KWARGS (comportamento storico).
+GRADCAM_MODES = ("image_only", "context")
+# Immagini per passo di gradiente. A 144 tutte insieme la GPU esaurisce la memoria: i
+# guided gradients tengono le attivazioni di TUTTA la rete per ogni immagine (misurato il
+# 01/08: ~22 GiB su un tensore (144, 8, 8, 1248), OOM su una GPU da 24 GB). Grad-CAM e' per
+# campione, quindi spezzare il batch da' lo stesso risultato a memoria costante. Alzarlo se
+# la GPU e' libera, abbassarlo se va ancora in OOM.
+GRADCAM_BATCH = 16
 # max_explain_samples was 6 -- lore_fidelity was the mean over SIX instances (the same 6
 # for all 110 runs), which is why it saturated at ~0.97-0.98 and could not discriminate
 # between strategies.  Raised to 32.  'random_state' is dropped because the xailib wrapper
@@ -87,6 +102,14 @@ LORE_SA_KWARGS = dict(
     max_explain_samples=32, every_n_epochs=1, max_samples=256, max_batches=2, rng_seed=0,
     neigh_type="genetic", num_instances=1000, mutpb=0.5, init_mutpb=0.3, threshold=0.5,
 )
+
+# Dove gira LORE. Il suo ciclo caldo e' la TESTA densa (~1000 valutazioni per istanza) piu'
+# l'algoritmo genetico e l'albero, che sono CPU puro; la CNN gira una volta sola per run.
+# Quindi tiene la GPU occupata 23 min/run senza usarla quasi: su una macchina condivisa,
+# 42 ore di GPU ferma. `"/CPU:0"` la libera. `None` = come prima.
+# ⚠️ `tf.device` non sposta le variabili gia' allocate: se serve davvero NON toccare la GPU,
+# il modo pulito e' far partire il processo con CUDA_VISIBLE_DEVICES="".
+LORE_SA_DEVICE = None
 
 ALL_ENGINES = ("shap", "gradcam", "lore")
 
@@ -141,21 +164,67 @@ CANONICAL_WRITE_GUARD = True
 # `lore_sa_per_epoch.csv`).  Tenerli separati qui e' quello che permette di aggiungere il
 # motore nuovo a una run che ha gia' quello legacy SENZA `allow_clobber` -- cioe' senza
 # aprire anche la porta a sovrascrivere il legacy nella stessa chiamata.
+def shap_subdir():
+    """`shap` o `shap_tab`, secondo che un campione XAI sia adottato o no.
+
+    UN SOLO posto decide dove vive SHAP, perche' tre pezzi devono essere d'accordo: chi
+    scrive (`make_xai_callbacks`), chi protegge (`_CLOBBERABLE`) e chi rilegge
+    (`xai_faithfulness._load_shap_values`). Se divergono, il guard difende una cartella
+    vuota mentre il lettore ne trova un'altra — e gli npz canonici di giugno, che sono sul
+    PREFISSO e senza stampigliatura, tornano a essere gli unici che si trovano.
+
+    `xai/shap/`      artefatti canonici, prefisso, mai riscritti
+    `xai/shap_tab/`  tutto cio' che e' calcolato sul campione adottato: array SHAP +
+                     fedelta' con segno. Una cartella, un campione.
+    """
+    return "shap_tab" if SHAP_KWARGS.get("subset_fingerprint") else "shap"
+
+
+def gradcam_subdir():
+    """`gradcam` o `gradcam_img`, secondo che un campione XAI sia adottato o no.
+
+    Stessa logica di `shap_subdir`. `xai/gradcam/` tiene i 106 PNG storici: OTTO immagini
+    prese dalla testa di `validation_ds`, senza array e senza traccia di quali fossero.
+    `xai/gradcam_img/` e' il lato immagine rifatto sul campione a lesioni distinte, con le
+    heatmap GREZZE salvate — che sono la precondizione di qualunque metrica sull'immagine.
+    """
+    return "gradcam_img" if SHAP_KWARGS.get("subset_fingerprint") else "gradcam"
+
+
 _CLOBBERABLE = {
-    "shap":    ("xai/shap/epoch_*", "xai/shap/*.csv"),
-    "gradcam": ("xai/gradcam/epoch_*",),
+    # dipende dal campione adottato, come `lore` dipende dal motore: vedi `_patterns_for`
+    "shap": {"shap":     ("xai/shap/epoch_*", "xai/shap/*.csv"),
+             "shap_tab": ("xai/shap_tab/epoch_*", "xai/shap_tab/shap_summary.csv")},
+    "gradcam": {"gradcam":     ("xai/gradcam/epoch_*",),
+                "gradcam_img": ("xai/gradcam_img/gradcam_arrays*_epoch_*.npz",
+                                "xai/gradcam_img/gradcam_summary.csv")},
     "lore": {
         "legacy":  ("xai/lore/epoch*/context", "xai/lore/epoch*/tabular_only",
                     "xai/lore/lore_fidelity_per_epoch.csv"),
-        "lore_sa": ("xai/lore/epoch*/tabular_sa", "xai/lore/lore_sa_per_epoch.csv"),
+        # 2026-08-01: LORE-SA ha una cartella sua, `xai/lore_sa/`. Prima conviveva col
+        # legacy dentro `xai/lore/` e i due si distinguevano per sottocartella
+        # (`tabular_sa` contro `context`+`tabular_only`); ora li separa il livello sopra,
+        # e il guard non deve piu' guardare dentro `xai/lore/` per questo motore.
+        # I `xai/lore/epoch*/tabular_sa/` delle run di giugno-luglio restano dove sono:
+        # sono artefatti storici e nessuna scrittura nuova puo' finirci sopra.
+        "lore_sa": ("xai/lore_sa/epoch*", "xai/lore_sa/lore_sa_per_epoch.csv"),
     },
+    # Non e' un engine di `make_xai_callbacks`: lo scrive
+    # `xai_faithfulness.aligned_signed_faithfulness`. Sta qui perche' `existing_xai_artifacts`
+    # e' l'unico posto che sa cosa una run ha gia' prodotto, e il loop della fedelta' lo
+    # interroga per la stessa ragione degli altri.
+    "shap_tab": ("xai/shap_tab/faithfulness_aligned_signed_*.json",),
 }
 
 
 def _patterns_for(engine):
     pats = _CLOBBERABLE.get(engine, ())
-    if isinstance(pats, dict):          # 'lore': dipende da quale motore e' selezionato
-        return pats.get(LORE_ENGINE, ())
+    if isinstance(pats, dict):
+        if engine == "shap":            # dipendono dal campione adottato
+            return pats.get(shap_subdir(), ())
+        if engine == "gradcam":
+            return pats.get(gradcam_subdir(), ())
+        return pats.get(LORE_ENGINE, ())   # 'lore': dipende da quale motore e' selezionato
     return pats
 
 
@@ -211,21 +280,40 @@ def assert_writable(run_dir, engines=ALL_ENGINES, allow_clobber=False):
 # Probe batch
 # --------------------------------------------------------------------------------------
 
-def make_probe_batch(n=8):
-    """The fixed sample of validation images the Grad-CAM grid is drawn on.
+def make_probe_batch(n=8, subset_idx=None):
+    """Le immagini di validation su cui gira Grad-CAM.
 
-    Taken from the head of ``validation_ds``, which is built with ``shuffle=False`` and
-    already mapped through the FeatureSpace -- i.e. the same first ``n`` rows the old
-    ``_materialize_probe`` rebuilt from ``validation_ids[:n]``.
+    ``subset_idx`` -- posizioni in ``validation_df``: e' cosi' che Grad-CAM spiega le STESSE
+    lesioni di SHAP e LORE.  Senza, si torna al comportamento storico: le prime ``n`` righe
+    di ``validation_ds`` (costruito con ``shuffle=False``), cioe' **otto** immagini del
+    prefisso.  Otto campioni non bastano per nessuna delle metriche sul lato immagine, ed e'
+    il motivo per cui il lato immagine e' stato rifatto il 2026-08-01.
 
     Used to be a module-level global mutated on first use and cached across every run in
     the study; it is now an explicit argument so a caller can score a different model on
     a different probe.
     """
     ctx = xf._CTX
-    xb, yb = next(iter(ctx.validation_ds))
-    xb = {k: v[:n] for k, v in xb.items()}
-    return xb, yb[:n]
+    if subset_idx is None:
+        xb, yb = next(iter(ctx.validation_ds))
+        return {k: v[:n] for k, v in xb.items()}, yb[:n]
+
+    # Si legge il dataset fino alla posizione piu' alta richiesta e poi si indicizza: e' la
+    # stessa strategia di `LoreSACallback._freeze_batch`, e non assume che il campione sia
+    # un prefisso -- che e' esattamente l'assunzione che ci ha gia' ingannati due volte.
+    import numpy as _np
+    import tensorflow as _tf
+    idx = _np.asarray(subset_idx, int)
+    need = int(idx.max()) + 1
+    xs_, ys_, seen = [], [], 0
+    for xb, yb in ctx.validation_ds:
+        xs_.append(xb); ys_.append(yb)
+        seen += int(_tf.shape(yb)[0])
+        if seen >= need:
+            break
+    x_all = {k: _tf.concat([b[k] for b in xs_], axis=0) for k in xs_[0]}
+    y_all = _tf.concat(ys_, axis=0)
+    return ({k: _tf.gather(v, idx) for k, v in x_all.items()}, _tf.gather(y_all, idx))
 
 
 # --------------------------------------------------------------------------------------
@@ -245,23 +333,34 @@ def make_xai_callbacks(run_dir, model_name, probe_batch=None, engines=ALL_ENGINE
 
     out = []
     if "shap" in engines:
-        d = os.path.join(xai_dir, "shap")
+        d = os.path.join(xai_dir, shap_subdir())
         os.makedirs(d, exist_ok=True)
         out.append(ShapCallback(
             data_source=ctx.validation_ds, validation_df=ctx.validation_df,
             feat_cols=ctx.feat_cols, encoded_feature_names=ctx.encoded_feature_names,
             base_dir=d, **SHAP_KWARGS))
     if "gradcam" in engines:
-        d = os.path.join(xai_dir, "gradcam")
+        d = os.path.join(xai_dir, gradcam_subdir())
         os.makedirs(d, exist_ok=True)
+        # Il probe batch segue il campione adottato: con `subset_idx` Grad-CAM spiega le
+        # STESSE lesioni di SHAP e LORE, e le heatmap diventano riallineabili con le altre
+        # due spiegazioni. Senza, resta il comportamento storico (le prime 8 righe).
+        _sub = SHAP_KWARGS.get("subset_idx")
         if probe_batch is None:
-            probe_batch = make_probe_batch(n=8)
+            probe_batch = make_probe_batch(subset_idx=_sub)
         out.append(MultiModalGradCAMCallback(
             engine=MultiModalGradCAMEngine(**GRADCAM_KWARGS),
             probe_batch=probe_batch, save_dir=d,
+            subset_idx=_sub, subset_fingerprint=SHAP_KWARGS.get("subset_fingerprint"),
+            modes=(GRADCAM_MODES if _sub is not None else None),
+            batch_size=GRADCAM_BATCH,
             tag=f"{model_name}/GradCAM", **GRADCAM_CB_KWARGS))
     if "lore" in engines:
-        d = os.path.join(xai_dir, "lore")
+        # Cartelle DISTINTE per i due motori (2026-08-01): `xai/lore/` resta del legacy,
+        # LORE-SA ha `xai/lore_sa/`. Prima condividevano `xai/lore/` e si separavano solo
+        # una sottocartella piu' in basso, il che rendeva impossibile leggere dal nome della
+        # directory quale motore avesse prodotto cosa.
+        d = os.path.join(xai_dir, "lore" if LORE_ENGINE == "legacy" else "lore_sa")
         os.makedirs(d, exist_ok=True)
         if LORE_ENGINE == "legacy":
             out.append(LoreCallback(
