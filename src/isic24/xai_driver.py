@@ -106,9 +106,22 @@ LORE_SA_KWARGS = dict(
 # Dove gira LORE. Il suo ciclo caldo e' la TESTA densa (~1000 valutazioni per istanza) piu'
 # l'algoritmo genetico e l'albero, che sono CPU puro; la CNN gira una volta sola per run.
 # Quindi tiene la GPU occupata 23 min/run senza usarla quasi: su una macchina condivisa,
-# 42 ore di GPU ferma. `"/CPU:0"` la libera. `None` = come prima.
-# ⚠️ `tf.device` non sposta le variabili gia' allocate: se serve davvero NON toccare la GPU,
-# il modo pulito e' far partire il processo con CUDA_VISIBLE_DEVICES="".
+# 42 ore di GPU ferma.
+#
+# `"/CPU:0"` sposta LORE sulla CPU **lasciando la GPU visibile e libera** per gli altri
+# motori: `run_posthoc_xai` passa il device a `load_run_model`, quindi le variabili NASCONO
+# sulla CPU. E' l'unico punto in cui la scelta ha effetto.
+#
+# ⚠️ Il `tf.device` attorno al solo calcolo (quello in `xai_lore_sa.on_epoch_end`) NON basta
+# e da solo fallisce — provato il 02/08, ~20 s per run:
+#     InvalidArgumentError: Trying to access resource stem_conv/kernel/... located in
+#     device /...GPU:0 from device /...CPU:0
+# perche' `tf.device` non sposta le variabili gia' allocate e la `predict` di Keras 3 e'
+# compilata con XLA, che rifiuta la variabile remota invece di copiarla.
+#
+# Costo MISURATO il 02/08 su 6 run: **20,0 min/run su CPU** contro i 22 min su GPU. La CPU
+# non costa niente, e' anzi leggermente piu' veloce — coerente con il fatto che la GPU serviva
+# solo alla CNN. Quindi `"/CPU:0"` e' la scelta giusta per il giro lungo, non un ripiego.
 LORE_SA_DEVICE = None
 
 ALL_ENGINES = ("shap", "gradcam", "lore")
@@ -431,13 +444,19 @@ def run_xai_on_best_epoch(best_model, xai_callbacks, best_epoch, best_val_auc, r
 # Post-hoc entry points
 # --------------------------------------------------------------------------------------
 
-def load_run_model(run_dir):
+def load_run_model(run_dir, device=None):
     """Reload a run's best checkpoint together with its recorded best epoch.
 
     ``safe_mode=False`` plus the five custom layers being registered (import
     ``isic24.mod_attendance`` anywhere in the session) is what lets the 70/110
     fixed_scaling / learnable_scaling / controlled_fusion / adaptive_gating checkpoints
     deserialize at all.
+
+    ``device`` (es. ``"/CPU:0"``) e' il device su cui le VARIABILI vengono create. E' la
+    differenza fra far girare un motore sulla CPU e non farlo: un `tf.device` attorno al
+    solo calcolo non sposta pesi gia' allocati sulla GPU, e la `predict` di Keras 3 (XLA)
+    muore invece di copiarli. Attorno al CARICAMENTO, invece, i pesi nascono dove si vuole
+    e da li' in poi tutto il grafo e' coerente. Vedi `LORE_SA_DEVICE`.
     """
     ck = sorted(glob.glob(os.path.join(run_dir, "checkpoints", "best_*.keras")))
     if not ck:
@@ -446,7 +465,10 @@ def load_run_model(run_dir):
     cfg_path = os.path.join(run_dir, "config.json")
     cfg = json.load(open(cfg_path)) if os.path.exists(cfg_path) else {}
 
-    model = keras.models.load_model(ck[0], compile=False, safe_mode=False)
+    import contextlib
+    import tensorflow as tf
+    with (tf.device(device) if device else contextlib.nullcontext()):
+        model = keras.models.load_model(ck[0], compile=False, safe_mode=False)
     return model, cfg
 
 
@@ -502,7 +524,20 @@ def run_posthoc_xai(run_dir, engines=ALL_ENGINES, best_epoch=None, best_val_auc=
     if not external:
         assert_writable(run_dir, engines=engines, allow_clobber=allow_clobber)
 
-    model, cfg = load_run_model(run_dir)
+    # DOVE nascono i pesi. Con `LORE_SA_DEVICE="/CPU:0"` il checkpoint viene caricato con le
+    # variabili sulla CPU, e da li' in poi LORE gira tutto sulla CPU pur avendo la GPU
+    # visibile e libera per gli altri motori. Il `tf.device` attorno al solo `explain`
+    # (`xai_lore_sa`) non basta e non e' un'alternativa: e' l'errore del 02/08.
+    # Vale per LORE DA SOLO: caricare su CPU un modello per SHAP o Grad-CAM li renderebbe
+    # lentissimi in silenzio, quindi la combinazione e' un errore invece che una sorpresa.
+    _dev = LORE_SA_DEVICE if "lore" in engines else None
+    if _dev and tuple(engines) != ("lore",):
+        raise RuntimeError(
+            f"LORE_SA_DEVICE={LORE_SA_DEVICE!r} vale per il modello INTERO: con "
+            f"engines={tuple(engines)} ci finirebbero sopra anche gli altri motori.\n"
+            "  Lanciare LORE da solo (engines=('lore',)), oppure LORE_SA_DEVICE=None.")
+
+    model, cfg = load_run_model(run_dir, device=_dev)
     model_name = (model_cfg or cfg).get("model_name", os.path.basename(run_dir))
     cbs = make_xai_callbacks(run_dir, model_name, probe_batch=probe_batch, engines=engines,
                              xai_dir=xai_dir)

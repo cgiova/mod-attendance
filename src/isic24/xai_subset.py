@@ -338,11 +338,12 @@ def resume_report(run_dirs, kind, fp, task=None):
 
 
 # Il piano di lavoro: quale motore scrive dove, con quale stampigliatura, e quanto costa.
-# `sec_per_sample` sono misure, non stime: SHAP 30/07, LORE 01/08 su 8 run (23.2 min a
-# n=48). Grad-CAM e' None finche' non lo si misura sulla prima run.
+# `sec_per_sample` sono misure, non stime: SHAP 30/07, LORE 02/08 su 6 run su CPU (20.0 min
+# a n=48; su GPU erano 22, vedi `xai_driver.LORE_SA_DEVICE`). Grad-CAM e' None finche' non lo
+# si misura sulla prima run.
 JOBS = {
     "shap":    dict(kind="shap_tab",    task="shap",  engines=("shap",),    sec_per_sample=1.2),
-    "lore":    dict(kind="lore_sa",     task=None,    engines=("lore",),    sec_per_sample=29.0),
+    "lore":    dict(kind="lore_sa",     task=None,    engines=("lore",),    sec_per_sample=25.0),
     "gradcam": dict(kind="gradcam_img", task=None,    engines=("gradcam",), sec_per_sample=None),
 }
 
