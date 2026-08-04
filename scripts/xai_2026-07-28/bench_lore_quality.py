@@ -3,7 +3,7 @@
 `bench_lore.py` ha misurato solo il TEMPO (genetic 113x piu' veloce). Quello non basta a
 scegliere: con i default, `lore_sa` genetic produce `rule_len = 1` e `fidelity = 1.0` su ogni
 campione, contro le 9.58 premesse del legacy. Le cause sono note (Addendum in
-`BENCH_lore_2026-07-28.md`):
+`MODALITY_ATTENDANCE.md`):
 
   * la fedelta' di `lore_sa` e' `dt.score(Z, Yb)` su un albero non potato, cioe' accuratezza
     di training: 1.0 per costruzione;

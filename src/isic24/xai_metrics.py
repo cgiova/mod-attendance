@@ -52,6 +52,7 @@ import pandas as pd
 MIN_SHAP_MASS = 1.0
 # T6 sotto questo numero di campioni in comune non e' una misura, e' rumore.
 MIN_OVERLAP = 20
+N_PERM_AGREEMENT = 200         # permutazioni del null dell'accordo SHAP<->LORE
 TOP_K = 10                      # top-k feature RAW, non encoded: vedi `raw_top_k`
 
 
@@ -252,20 +253,24 @@ def rule_features(rule_text):
     return out
 
 
-def shap_lore_agreement(run_dir, encoded_feature_names, k=TOP_K, lore_idx=None):
+def shap_lore_agreement(run_dir, encoded_feature_names, k=TOP_K, lore_idx=None,
+                        n_perm=N_PERM_AGREEMENT, seed=0):
     """T6 — Jaccard fra le top-k feature RAW di SHAP e le feature nella regola LORE.
 
     ⚠️ DUE OSTACOLI, entrambi misurati, entrambi riportati come colonne invece che nascosti.
 
     1. **Spazi diversi.** SHAP vive su 127 dimensioni ENCODED, le regole LORE su feature
        RAW.  L'aggregazione encoded->raw e' `raw_top_k`, non una Jaccard diretta.
-    2. **Campioni diversi, e il problema PEGGIORA quando si corregge il campionamento.**
-       SHAP sta sul prefisso `0..127` (tetto duro a 128, cfr. shap-128-hard-ceiling); LORE
-       sta su 48 indici del campione a 144 lesioni distinte.  Sovrapposizione misurata il
-       2026-08-01: **41/48** con il campione LORE del 31/07 (che era un prefisso dei 144),
-       ma **14/48** con il campione BILANCIATO che la cella `3/3` costruisce adesso.
-       Chi rilancia la `3/3` vedra' `n_overlap` crollare: non ha rotto niente, ha corretto
-       il campione.  Sotto `MIN_OVERLAP` il risultato e' `NaN`.
+    2. **I due explainer indicizzano in spazi diversi, e i due nomi si somigliano.**
+       `explained_indices` degli npz SHAP e' la posizione DENTRO il campione (`0..143`);
+       `val_index` e' la posizione in `validation_df` (`1..1059`), ed e' quella che scrive
+       LORE.  Appaiare l'uno con l'altro non solleva: incrocia i due spazi e restituisce
+       le collisioni fortuite — **15/48** sulle run del 03/08, sotto `MIN_OVERLAP`, cioe'
+       un `NaN` che sembra un campione sbagliato e invece era un confronto sbagliato.
+       Con `val_index` su entrambi i lati la sovrapposizione e' **48/48**.
+       Gli npz canonici in `xai/shap/` sono anteriori a `val_index`: li' il campione E' il
+       prefisso, quindi `explained_indices` vive gia' in spazio `validation_df` ed e' il
+       fallback corretto.  Sotto `MIN_OVERLAP` il risultato resta `NaN`.
     """
     p = _shap_npz(run_dir)
     lore = _lore_persample(run_dir)
@@ -273,7 +278,10 @@ def shap_lore_agreement(run_dir, encoded_feature_names, k=TOP_K, lore_idx=None):
         return None
     with np.load(p) as z:
         phi = np.abs(np.asarray(z["shap_values"], float))
-        shap_idx = np.asarray(z["explained_indices"], int).ravel()
+        # `val_index` per le run nuove, `explained_indices` per i canonici sul prefisso:
+        # LORE indicizza su `validation_df`, quindi SHAP deve farlo anche lui.
+        key = "val_index" if "val_index" in z.files else "explained_indices"
+        shap_idx = np.asarray(z[key], int).ravel()
 
     # ⚠️ La colonna `i` del CSV LORE e' la posizione DENTRO il campione LORE, NON in
     # `validation_df`.  Le due cose coincidono solo se il campione LORE era il prefisso —
@@ -308,16 +316,73 @@ def shap_lore_agreement(run_dir, encoded_feature_names, k=TOP_K, lore_idx=None):
                                  f"(minimo {MIN_OVERLAP})")
         return rec
     g = raw_groups(encoded_feature_names)
-    js = []
+    A_sets, B_sets = [], []
     for si, li in pairs:
         A = raw_top_k(phi[si], g, k=k)
         B = rule_features(lore["rule_text"].iloc[li])
         if not A and not B:
             continue
-        js.append(len(A & B) / max(len(A | B), 1))
-    rec["agreement_shap_lore"] = float(np.mean(js)) if js else np.nan
-    rec["agreement_n_used"] = len(js)
+        A_sets.append(A)
+        B_sets.append(B)
+
+    def _j(a, b):
+        return len(a & b) / max(len(a | b), 1)
+
+    rec["agreement_shap_lore"] = (float(np.mean([_j(a, b) for a, b in zip(A_sets, B_sets)]))
+                                  if A_sets else np.nan)
+    rec["agreement_n_used"] = len(A_sets)
+    if A_sets:
+        rec.update(_agreement_null(A_sets, B_sets, sorted(g), n_perm=n_perm, seed=seed))
     return rec
+
+
+def _agreement_null(A_sets, B_sets, raw_features, n_perm=N_PERM_AGREEMENT, seed=0):
+    """Il null dell'accordo SHAP<->LORE, su DUE scale. Senza, il numero non si legge.
+
+    Una Jaccard fra un top-k e un insieme di regole cresce **meccanicamente** con la
+    lunghezza della regola, e `rule_len` e' esattamente cio' che ordina le famiglie: il
+    valore grezzo produce quindi un ordinamento che sembra un risultato e non lo e'.
+    Misurato il 2026-08-04 su 110 run: rho con `mean_rule_feats` +0.937 sull'osservato e
+    **+0.945 sul null**, eccesso -0.008.  Percio' queste colonne escono INSIEME
+    all'accordo, non "dopo, se serve".
+
+    * `agreement_null_*` — permutazione DENTRO la run: la riga SHAP *i* si appaia con una
+      regola rimescolata.  Conserva le dimensioni degli insiemi da entrambi i lati e
+      distrugge solo la corrispondenza **per campione**.
+    * `agreement_rho_global` — e quello da solo non basta: conservando le marginali, un
+      null-level e' compatibile con «concordano su quali feature contano globalmente, e non
+      su quali contino per QUESTA lesione».  Si discrimina correlando le due frequenze per
+      feature raw sull'intera run.  Il suo null rimescola l'identita' della feature.
+    """
+    from scipy import stats
+
+    rng = np.random.default_rng(seed)
+
+    def _j(a, b):
+        return len(a & b) / max(len(a | b), 1)
+
+    obs = float(np.mean([_j(a, b) for a, b in zip(A_sets, B_sets)]))
+    null = np.array([np.mean([_j(A_sets[i], B_sets[j]) for i, j in
+                              enumerate(rng.permutation(len(B_sets)))])
+                     for _ in range(n_perm)])
+    sd = float(null.std())
+    out = {
+        "agreement_null_mean": float(null.mean()),
+        "agreement_null_sd": sd,
+        "agreement_z": float((obs - null.mean()) / sd) if sd > 0 else np.nan,
+        "agreement_p_perm": float((1 + int((null >= obs).sum())) / (1 + len(null))),
+        "agreement_mean_rule_feats": float(np.mean([len(b) for b in B_sets])),
+    }
+    fa = np.array([sum(f in s for s in A_sets) for f in raw_features], float)
+    fb = np.array([sum(f in s for s in B_sets) for f in raw_features], float)
+    if fa.std() > 0 and fb.std() > 0:
+        out["agreement_rho_global"] = float(stats.spearmanr(fa, fb)[0])
+        gn = [stats.spearmanr(fa, rng.permutation(fb))[0] for _ in range(max(n_perm // 4, 10))]
+        out["agreement_rho_global_null"] = float(np.median(gn))
+        ta = {raw_features[i] for i in np.argsort(-fa)[:TOP_K]}
+        tb = {raw_features[i] for i in np.argsort(-fb)[:TOP_K]}
+        out["agreement_top_global_jaccard"] = len(ta & tb) / max(len(ta | tb), 1)
+    return out
 
 
 # --------------------------------------------------------------------------------------
@@ -347,7 +412,12 @@ def _run_top_k(run_dir, groups, k=TOP_K):
         return None, None
     with np.load(p) as z:
         phi = np.abs(np.asarray(z["shap_values"], float))
-        idx = np.asarray(z["explained_indices"], int).ravel()
+        # `val_index` e non `explained_indices`: il secondo vale `0..n-1` per QUALUNQUE
+        # campione, quindi il guard sull'identita' in `stability_table` non potrebbe mai
+        # scattare — due campioni diversi darebbero indici identici. Con `val_index` il
+        # confronto e' sulle lesioni vere. Sui canonici (prefisso) i due coincidono.
+        key = "val_index" if "val_index" in z.files else "explained_indices"
+        idx = np.asarray(z[key], int).ravel()
     return [raw_top_k(r, groups, k) for r in phi], idx
 
 

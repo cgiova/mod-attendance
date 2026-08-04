@@ -748,7 +748,13 @@ def sample_matches(run_dir, kind, expected_idx):
         if not hits:
             return None
         with np.load(hits[-1]) as z:
-            got = np.asarray(z["explained_indices"], int).ravel()
+            # `explained_indices` sono posizioni DENTRO il campione (`0..n-1`) per
+            # QUALUNQUE campione: confrontarle con `expected_idx`, che vive in spazio
+            # `validation_df`, dava **sempre** False — cioe' "rifai tutto" su artefatti
+            # sani. Come per gli altri due kind, l'assenza di `val_index` e' "non lo so".
+            if "val_index" not in z.files:
+                return None
+            got = np.asarray(z["val_index"], int).ravel()
     elif kind == "gradcam_img":
         hits = sorted(_glob.glob(os.path.join(d, "gradcam_arrays*_epoch_*.npz")))
         if not hits:

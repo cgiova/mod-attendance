@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import glob
 import os
+import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
@@ -279,10 +280,21 @@ def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
 
         found = [("canonical", "abs", canonical), ("aligned", "abs", aligned)]
         if include_signed:
-            sdir = os.path.join(signed_root, str(r.run_id))
-            found += [("aligned_signed", m,
-                       os.path.join(sdir, f"faithfulness_aligned_signed_{m}_curves.npz"))
-                      for m in SIGNED_MODES]
+            # DOVE stanno le curve signed. Dal 01/08 le scrive `aligned_signed_faithfulness`
+            # dentro la run (`xai/shap_tab/`), sul campione a lesioni distinte: 110 run x 4
+            # modi = 440 file. La vecchia radice `_robustness/aligned_signed/` ne ha 24, di
+            # 6 run sul PREFISSO, scelte per convenienza — leggere quella significa
+            # pubblicare medie di famiglia con n_runs=1 su un campione superato.
+            # Per-run PRIMA, radice vecchia come fallback: cosi' una run gia' rifatta non
+            # viene mai letta dalla copia vecchia, e le run che non lo sono restano visibili.
+            sdir_run = os.path.join(run_dir, "xai", "shap_tab")
+            sdir_old = os.path.join(signed_root, str(r.run_id))
+            for m in SIGNED_MODES:
+                fname = f"faithfulness_aligned_signed_{m}_curves.npz"
+                p_run = os.path.join(sdir_run, fname)
+                found.append(("aligned_signed", m,
+                              p_run if os.path.exists(p_run)
+                              else os.path.join(sdir_old, fname)))
 
         for source, mode, path in found:
             if os.path.exists(path):
@@ -291,7 +303,27 @@ def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
                     "setting_tag": r.setting_tag, "source": source, "mode": mode,
                     "npz_path": path,
                 })
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+
+    # Il fallback qui sopra e' comodo e ha un buco: se UNA run non avesse il file per-run,
+    # verrebbe pescata dalla radice vecchia — cioe' dal PREFISSO — e finirebbe nella stessa
+    # media di famiglia di 109 run sul campione a lesioni distinte, senza un errore. E' la
+    # forma di difetto che e' gia' costata due volte (`combined_faithfulness.csv` a 130
+    # righe, `lore_sa_quality` con due `pos_rate`). Qui non si indovina: si dice.
+    if len(out) and (out.source == "aligned_signed").any():
+        sg = out[out.source == "aligned_signed"]
+        per_run = sg.npz_path.str.contains(os.sep + "shap_tab" + os.sep)
+        if per_run.any() and (~per_run).any():
+            mixed = sorted(sg.loc[~per_run, "run_id"].unique())
+            warnings.warn(
+                f"[CURVE FILES] le curve `aligned_signed` vengono da DUE campioni: "
+                f"{int(per_run.sum())} file dalle run (lesioni distinte) e "
+                f"{int((~per_run).sum())} da _robustness/aligned_signed (prefisso).\n"
+                f"  Run ancora sul prefisso: {mixed[:6]}{' ...' if len(mixed) > 6 else ''}\n"
+                f"  Mediarle insieme mescola due popolazioni. Rifare quelle run, oppure "
+                f"filtrare su `npz_path.str.contains('shap_tab')`.", RuntimeWarning,
+                stacklevel=2)
+    return out
 
 
 # --------------------------------------------------------------------------------------

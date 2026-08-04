@@ -13,19 +13,19 @@ vanno riadattati. Il codice riutilizzabile sta in `src/isic24/xai_*.py`.
 
 | script | cosa produce | memo |
 |---|---|---|
-| `run_strata_signed.py` | `runs/_faithfulness/faithfulness_strata_signed{,_pooled}.csv` — **CPU, ~20 s, nessun notebook**: sola re-integrazione delle 24 curve signed a q≤0.2 e q≤0.6, con `gain_norm`. Auto-verifica P1–P5. | `FINDINGS_budget_signed_2026-07-30.md` |
-| `run_signed.py` | `runs/_faithfulness/faithfulness_aligned_signed.csv` + `runs/_robustness/aligned_signed/<run_id>/` — 1 run per famiglia, n=128 | `FINDINGS_signed_tabular_2026-07-28.md` |
+| `run_strata_signed.py` | `runs/_faithfulness/faithfulness_strata_signed{,_pooled}.csv` — **CPU, ~20 s, nessun notebook**: sola re-integrazione delle 24 curve signed a q≤0.2 e q≤0.6, con `gain_norm`. Auto-verifica P1–P5. | `MODALITY_ATTENDANCE.md` |
+| `run_signed.py` | `runs/_faithfulness/faithfulness_aligned_signed.csv` + `runs/_robustness/aligned_signed/<run_id>/` — 1 run per famiglia, n=128 | `MODALITY_ATTENDANCE.md` |
 | `run_signed_a05.py` | idem, ma forza `fixed_scaling` seed 47 setting `a0p500` (**non ancora eseguito**, vedi sotto) | idem |
 | `equiv.py` | equivalenza numerica notebook-vecchio vs `src/isic24/xai_*` — PASS 6/6 famiglie, scarto 0 | — |
-| `test_signed.py` | unit test dell'attributore allineato (efficienza di Permutation, `Σφ = logit(p(x)) − logit(p(base))`) | `FINDINGS_signed_tabular_2026-07-28.md` |
+| `test_signed.py` | unit test dell'attributore allineato (efficienza di Permutation, `Σφ = logit(p(x)) − logit(p(base))`) | `MODALITY_ATTENDANCE.md` |
 | `test_driver.py` | smoke test di `run_posthoc_xai` (overwrite on/off, niente righe duplicate nei CSV in append) | — |
-| `bench_lore.py` + `bench_lore.csv` | benchmark `lore_explainer` vs `lore_sa`, genetic/random, min/sample — solo **tempo** | `BENCH_lore_2026-07-28.md` |
-| `bench_lore_quality.py` | sceglie il generatore del vicinato: diversità, `neigh_pos_rate`, `rule_len`, **`fid_cv_bacc`** | `BENCH_lore_2026-07-28.md` (Addendum) |
+| `bench_lore.py` + `bench_lore.csv` | benchmark `lore_explainer` vs `lore_sa`, genetic/random, min/sample — solo **tempo** | `MODALITY_ATTENDANCE.md` |
+| `bench_lore_quality.py` | sceglie il generatore del vicinato: diversità, `neigh_pos_rate`, `rule_len`, **`fid_cv_bacc`** | `MODALITY_ATTENDANCE.md` (Addendum) |
 | `cell_fill_missing_shap.py` | la stessa cosa come **cella da `%load`** nel notebook post-hoc, sul contesto già caricato | — |
 | `fill_missing_shap.py` | genera gli array SHAP dei **20** run che non li hanno (tutti `learnable_scaling` con `init_alpha≠0.5`) — additivo, ~30 min | — |
 | `nbcheck.py`, `freenames.py` | checker AST dei nomi liberi nei notebook | — |
 
-La stratificazione `abs` (`FINDINGS_strata_2026-07-28.md`) **non** ha uno script qui: sta
+La stratificazione `abs` (`MODALITY_ATTENDANCE.md`) **non** ha uno script qui: sta
 tutta in `src/isic24/xai_faithfulness.py` (`build_strata`, `stratified_table`,
 `pool_by_family`, `verify_reintegration`). Quella signed sì — è `run_strata_signed.py`,
 che è anche l'unico script della cartella eseguibile senza GPU e senza il notebook.

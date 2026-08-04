@@ -1,7 +1,7 @@
 """ARCHIVED — Stage 0-3 verification runs, extracted verbatim from the post-hoc notebook.
 
 These are the checks whose CONCLUSIONS WERE RETRACTED (see
-`artifacts/enhanced/reports/FINDINGS_insertion_deletion_2026-07-21.md`).  They are kept
+`MODALITY_ATTENDANCE.md`).  They are kept
 because two of them are still cited as primary artifact sources in the reports:
 
   * Stage 2  -> `runs/_robustness/stage2_aligned_attr/faithfulness_aligned_attr.csv`

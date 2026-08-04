@@ -97,7 +97,7 @@ LORE_ENGINE = "lore_sa"
 # Configurazione scelta il 2026-07-29 misurando su vanilla seed_47 (n=2 campioni):
 # `mutpb=.5` + `init_mutpb=.3` da' 2.9x la diversita' di upstream, le regole piu' lunghe
 # (3.0) e 4x l'evidenza di classe opposta di `mutpb=.8`, a +19% di costo.  Dettagli e
-# tabella completa: BENCH_lore_2026-07-28.md, "Scelta del generatore".
+# tabella completa: `MODALITY_ATTENDANCE.md`, "Scelta del generatore".
 LORE_SA_KWARGS = dict(
     max_explain_samples=32, every_n_epochs=1, max_samples=256, max_batches=2, rng_seed=0,
     neigh_type="genetic", num_instances=1000, mutpb=0.5, init_mutpb=0.3, threshold=0.5,
