@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -15,6 +16,7 @@ venv/
 .env.*
 conda/
 *.conda
+condaenv.*.requirements.txt
 
 # data
 data/
@@ -24,7 +26,7 @@ data/
 *.csv
 *.zip
 
-# artifacts
+# artifacts — ci vivono anche i report: MODALITY_ATTENDANCE.md NON viaggia nei commit
 models/
 runs/
 outputs/
@@ -32,29 +34,19 @@ wandb/
 tb/
 logs/
 artifacts/
+smoothgrad_logs/
 
-# os
+# IDE / OS
+.idea/
 .DS_Store
 Thumbs.db
 
-src/isic24/colab_bootstrap.sh
-/src/isic24/script_modlaity_importance_change_aggiunta.docx
+# tooling degli agenti: configurazione locale, non di progetto
 /CLAUDE.md
-
-.agents/.claude
-/smoothgrad_logs/
 /AGENTS.md
-.idea/AICommit.xml
-artifacts/REPORT_MODALITY_ATTENDANCE.md
-.idea/isic24.iml
-.idea/isic24.iml
-.idea/isic24.iml
-scripts/homogenize_artifacts.py
-.idea/pyProjectModel.xml
-.idea/isic24.iml
-/.agents/.junie/
-/.agents/.codex/
 /.agents/
-/MODALITY_ATTENDANCE_COLLECTION_STATUS.md
-/notebooks/modality_attendance/backfill_lore_loss_reg.py
-/condaenv.hpvibbkd.requirements.txt
+.claude/settings.local.json
+
+# one-off locali
+/notebooks/modality_attendance/feature_space_guard.py
+/src/isic24/colab_bootstrap.sh

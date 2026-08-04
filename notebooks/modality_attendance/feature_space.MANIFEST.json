@@ -1,0 +1,7 @@
+{
+  "encoded_dim": 127,
+  "fingerprint_sha256": "e8fa85b285bdcf62ee8540984c3e7ef8c4132011505e052a071301447cd86316",
+  "canonical_file": "artifacts/enhanced/feature_space/feature_space.CANONICAL-backup.keras",
+  "note": "Canonical FeatureSpace for the ISIC-24 modality-attendance study. All 110 checkpoints were trained with these adapt statistics. Regenerated 2026-07-18 after the original manifest was deleted; fingerprint verified against the value recorded 2026-07-15 (e8fa85b285bdcf62...). COMMIT THIS FILE - it is the guard's only reference and artifacts/ is gitignored.",
+  "regenerated_utc": "2026-07-18T14:30:30.642444Z"
+}
