@@ -14,15 +14,11 @@ vanno riadattati. Il codice riutilizzabile sta in `src/isic24/xai_*.py`.
 | script | cosa produce | memo |
 |---|---|---|
 | `run_strata_signed.py` | `runs/_faithfulness/faithfulness_strata_signed{,_pooled}.csv` — **CPU, ~20 s, nessun notebook**: sola re-integrazione delle 24 curve signed a q≤0.2 e q≤0.6, con `gain_norm`. Auto-verifica P1–P5. | `MODALITY_ATTENDANCE.md` |
-| `run_signed.py` | `runs/_faithfulness/faithfulness_aligned_signed.csv` + `runs/_robustness/aligned_signed/<run_id>/` — 1 run per famiglia, n=128 | `MODALITY_ATTENDANCE.md` |
-| `run_signed_a05.py` | idem, ma forza `fixed_scaling` seed 47 setting `a0p500` (**non ancora eseguito**, vedi sotto) | idem |
 | `equiv.py` | equivalenza numerica notebook-vecchio vs `src/isic24/xai_*` — PASS 6/6 famiglie, scarto 0 | — |
 | `test_signed.py` | unit test dell'attributore allineato (efficienza di Permutation, `Σφ = logit(p(x)) − logit(p(base))`) | `MODALITY_ATTENDANCE.md` |
 | `test_driver.py` | smoke test di `run_posthoc_xai` (overwrite on/off, niente righe duplicate nei CSV in append) | — |
 | `bench_lore.py` + `bench_lore.csv` | benchmark `lore_explainer` vs `lore_sa`, genetic/random, min/sample — solo **tempo** | `MODALITY_ATTENDANCE.md` |
 | `bench_lore_quality.py` | sceglie il generatore del vicinato: diversità, `neigh_pos_rate`, `rule_len`, **`fid_cv_bacc`** | `MODALITY_ATTENDANCE.md` (Addendum) |
-| `cell_fill_missing_shap.py` | la stessa cosa come **cella da `%load`** nel notebook post-hoc, sul contesto già caricato | — |
-| `fill_missing_shap.py` | genera gli array SHAP dei **20** run che non li hanno (tutti `learnable_scaling` con `init_alpha≠0.5`) — additivo, ~30 min | — |
 | `nbcheck.py`, `freenames.py` | checker AST dei nomi liberi nei notebook | — |
 
 La stratificazione `abs` (`MODALITY_ATTENDANCE.md`) **non** ha uno script qui: sta
@@ -95,3 +91,10 @@ stringa che rimpiazza in `run_signed.py` combacia ancora.)
 Tutte le altre righe del CSV sono state calcolate su Quadro RTX 6000; se un giorno
 questa venisse calcolata su CPU, va annotato nel memo — la tabella serve a confrontare
 famiglie fra loro e presuppone lo stesso substrato.
+
+> **Pulizia del 2026-08-04.** Rimossi da qui `run_signed.py` e `run_signed_a05.py` (producevano
+> la tabella signed a 6 righe, cancellata come trappola: §2.3 usa `a0p500` su 5 seed) e
+> `fill_missing_shap.py` / `cell_fill_missing_shap.py` (servivano ai 20 run senza array SHAP;
+> il rifacimento del 04/08 copre 110/110). Restano nella storia di git.
+> **`run_strata_signed.py` e' il prossimo candidato**: i suoi output non esistono piu' e la
+> stratificazione la produce ora `@@STRATA_SECTION@@` nel notebook post-hoc.

@@ -84,7 +84,7 @@ md(r"""## P1 — Setup
 
 Esegue le celle di codice del notebook post-hoc **in ordine, fino alla prima che contiene
 `xf.configure`** (cella 23), e tiene i globals risultanti in `NB`. È esattamente il contratto
-che usano `run_signed.py`, `bench_lore.py` ed `equiv.py`: se questa cella passa, passa il loro
+che usano `bench_lore.py` ed `equiv.py`: se questa cella passa, passa il loro
 setup.
 
 Include il guard anti-drift della FeatureSpace, quindi un fallimento qui può anche voler dire
@@ -160,7 +160,7 @@ md(r"""## P2 — Deserializzazione dei checkpoint
 70 checkpoint su 110 (`fixed_scaling`, `learnable_scaling`, `controlled_fusion`,
 `adaptive_gating`) contengono layer custom: senza `import isic24.mod_attendance` da qualche
 parte nella sessione falliscono in silenzio. Qui ne carico **uno per famiglia** e verifico
-anche che gli array SHAP salvati esistano — è il filtro che `run_signed.py` usa per scegliere
+anche che gli array SHAP salvati esistano — era il filtro che `run_signed.py` (rimosso il 2026-08-04) usava per scegliere
 i run.""")
 co(r'''
 import isic24.mod_attendance  # registra i 5 layer custom
@@ -566,7 +566,6 @@ print("""Se P0-P6 sono PASS, i run veri sono:
 
   # 2. (solo se decidi di promuovere la variante signed a primaria) tutti i 110 run, ~5 h
   #    serve per un ranking fra famiglie difendibile: le righe attuali sono run singoli
-  PER_FAMILY=999 python scripts/xai_2026-07-28/run_signed.py
 
 Entrambi scrivono in append su
   artifacts/enhanced/runs/_faithfulness/faithfulness_aligned_signed.csv
