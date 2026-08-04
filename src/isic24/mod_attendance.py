@@ -144,6 +144,37 @@ class GateEntropyLoss(keras.layers.Layer):
         return cfg
 
 
+def assert_loss_is_per_sample(model, impl_name=""):
+    """Solleva se la loss compilata annullerebbe `class_weight`.
+
+    `class_weight` diventa `sample_weight`, e Keras lo applica al valore **restituito** dalla
+    loss. Se la loss riduce gia' a scalare, la pesatura degenera in un fattore moltiplicativo
+    unico e non distingue piu' le classi — in silenzio, senza nessun errore.
+
+    Non e' teorico (audit 2026-08-04): `build_loss_regularized` con ``reg_mode='per_batch'`` fa
+    ``tf.reduce_mean`` dentro la loss, e le 25 run canoniche di `loss_regularization` hanno
+    addestrato NON pesate mentre le altre cinque famiglie lo erano. Misurato:
+    ``cos(direzione con class_weight, direzione senza)`` = **1.000000**.
+
+    Le ``keras.losses.Loss`` sono esenti: applicano `sample_weight` PRIMA della riduzione.
+
+    Test: sezione 12 di ``scripts/xai_2026-07-28/test_guards.py``.
+    """
+    fn = getattr(model, "loss", None)
+    if fn is None or isinstance(fn, keras.losses.Loss) or not callable(fn):
+        return
+    try:
+        out = fn(tf.zeros((8, 1)), tf.fill((8, 1), 0.5))
+    except Exception:                  # loss non richiamabile a mano: non si blocca il run
+        return
+    if len(getattr(out, "shape", ())) == 0:
+        raise ValueError(
+            f"[CLASS WEIGHT GUARD] {impl_name or getattr(model, 'name', '?')}: la loss compilata "
+            f"restituisce uno SCALARE, quindi `class_weight` non pesa le classi ma scala "
+            f"l'intera loss di un fattore unico. Togliere la riduzione dalla loss (restituire un "
+            f"valore per campione), oppure mettere USE_CLASS_WEIGHT = False e dichiararlo.")
+
+
 def weighted_loss_ps(y_true, y_pred):
     """
     Per-sample weighted regularized loss

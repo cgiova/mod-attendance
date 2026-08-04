@@ -288,6 +288,174 @@ try:
 finally:
     xf.ACTIVE_SUBSET_FINGERPRINT, xf.FAITH_SUBSET_IDX = _pf, _pi
 
+# ======================================================================= 11 ===
+section("11. IDENTITA' DELLO SPLIT — il validation di oggi e' quello dei checkpoint di giugno?")
+# La domanda di PARTE 0: le 1091 righe su cui misuriamo sono davvero quelle da cui i 110
+# checkpoint erano tenuti fuori? Il ponte con giugno e' il vettore `labels` (128 campioni)
+# dentro le npz `xai/faithfulness/faithfulness_curves.npz`, scritte durante il training di
+# giugno. `validation_ds` e' costruito con shuffle=False, quindi quei 128 sono esattamente
+# `validation_df.head(128)`: confrontabili con una rigenerazione odierna.
+#
+# Il caso B e' quello che rende il test falsificabile: uno split PERTURBATO deve NON
+# combaciare. Senza, un confronto che passa per costruzione non proverebbe niente.
+import glob as _glob                                              # noqa: E402
+import random as _random                                          # noqa: E402
+
+_SEED, _NEG, _POS = 49, 0.01, 5.0
+_PARQ = os.path.join(BASE, "data", "isic24", "enhanced",
+                     "enhanced_train_metadata_clean.parquet")
+_june = sorted(_glob.glob(os.path.join(
+    ART, "runs", "*", "*", "seed_*", "*", "xai", "faithfulness", "faithfulness_curves.npz")))
+
+
+def _regen_validation(rng_offset=0, shuffle_rs=None):
+    """Replica delle celle 1/4/6/9 del notebook di training, su CPU e senza keras.
+
+    `keras.utils.set_random_seed(49)` semina il RNG globale di numpy. Lo shuffle storico era
+    `.sample(frac=1.0)` SENZA random_state, e quindi consumava proprio quel RNG: `rng_offset`
+    simula il caso in cui il globale non e' piu' allo stato iniziale — per esempio dopo che
+    `run_experiment` ha chiamato `set_random_seed(run_seed)`.
+
+    `shuffle_rs=_SEED` e' la versione corretta il 04/08 nel notebook, che deve dare lo STESSO
+    split **e** reggere a un RNG globale sporco.
+    """
+    from sklearn.model_selection import StratifiedGroupKFold
+    _random.seed(_SEED)
+    np.random.seed(_SEED)
+    for _ in range(rng_offset):
+        np.random.random()
+    d = pd.read_parquet(_PARQ).ffill()
+    maj = d.query("target==0").sample(frac=_NEG, random_state=_SEED)
+    mino = d.query("target==1").sample(frac=_POS, replace=True, random_state=_SEED)
+    d = pd.concat([maj, mino], axis=0)
+    d = (d.sample(frac=1.0) if shuffle_rs is None
+         else d.sample(frac=1.0, random_state=shuffle_rs)).reset_index(drop=True)
+    d["fold"] = -1
+    sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=_SEED)
+    for i, (_tr, _va) in enumerate(sgkf.split(d, y=d.target, groups=d.patient_id)):
+        d.loc[_va, "fold"] = int(i)
+    return d.query("fold!=0"), d.query("fold==0")
+
+
+if not (os.path.exists(_PARQ) and _june):
+    print("  (dataset o npz di giugno non disponibili: sezione saltata)")
+else:
+    _lab_june = np.load(_june[0])["labels"].astype(np.float32)
+
+    # tutte le run di giugno devono condividere UN SOLO vettore di label: se lo split fosse
+    # cambiato in corsa fra le sessioni di training, i 110 checkpoint non sarebbero appaiati.
+    _sigs = {np.asarray(np.load(f)["labels"], dtype=np.float32).tobytes() for f in _june}
+    check("A. un solo vettore `labels` su tutte le npz di giugno", len(_sigs) == 1,
+          f"{len(_sigs)} distinti su {len(_june)} npz")
+
+    _tr, _va = _regen_validation()
+    check("B. la rigenerazione da' 4360/1091", (len(_tr), len(_va)) == (4360, 1091),
+          f"train={len(_tr)} val={len(_va)}")
+
+    _lab_now = _va.target.to_numpy()[:128].astype(np.float32)
+    check("C. prefisso 128: label di oggi == label di giugno",
+          np.array_equal(_lab_now, _lab_june),
+          f"match {float((_lab_now == _lab_june).mean()):.3f}, n_pos {int(_lab_june.sum())}")
+
+    # il caso che deve FALLIRE: split perturbato -> il confronto deve accorgersene
+    _va_bad = _regen_validation(rng_offset=1)[1]
+    _lab_bad = _va_bad.target.to_numpy()[:128].astype(np.float32)
+    check("D. split perturbato -> il confronto NON combacia (il test sa fallire)",
+          not np.array_equal(_lab_bad, _lab_june),
+          f"match {float((_lab_bad == _lab_june).mean()):.3f}")
+
+    # ...ma l'INSIEME resta lo stesso: e' l'ordine a muoversi, ed e' posizionale che si indicizza
+    check("E. lo split perturbato cambia l'ORDINE, non l'insieme",
+          set(_va_bad.isic_id) == set(_va.isic_id)
+          and not np.array_equal(_va_bad.isic_id.to_numpy(), _va.isic_id.to_numpy()),
+          "stesso set, ordine diverso")
+
+    check("F. nessuna lesione e nessun paziente attraversa train/validation",
+          not (set(_tr.isic_id) & set(_va.isic_id)) and not (set(_tr.patient_id) & set(_va.patient_id)),
+          f"lesioni {len(set(_tr.isic_id) & set(_va.isic_id))}, "
+          f"pazienti {len(set(_tr.patient_id) & set(_va.patient_id))}")
+
+    # il fix del 04/08: shuffle seminato -> stesso split di giugno, E immune al RNG sporco
+    _va_fix = _regen_validation(shuffle_rs=_SEED)[1]
+    check("H. shuffle seminato -> stesso split di giugno",
+          np.array_equal(_va_fix.target.to_numpy()[:128].astype(np.float32), _lab_june)
+          and np.array_equal(_va_fix.isic_id.to_numpy(), _va.isic_id.to_numpy()),
+          "random_state=CFG.seed non cambia un numero di ISIC24")
+    _va_fix_dirty = _regen_validation(rng_offset=13, shuffle_rs=_SEED)[1]
+    check("I. shuffle seminato -> regge il RNG globale sporco (era il difetto)",
+          np.array_equal(_va_fix_dirty.isic_id.to_numpy(), _va.isic_id.to_numpy()),
+          "13 draw consumati prima: ordine invariato")
+
+    _snap_p = os.path.join(BASE, "notebooks", "modality_attendance", "validation_ids.SEED49.json")
+    if os.path.exists(_snap_p):
+        import json as _json
+        _snap = _json.load(open(_snap_p))
+        check("G. lo snapshot validation_ids combacia con la rigenerazione",
+              sorted(_va.isic_id.tolist()) == _snap["isic_ids_sorted"],
+              f"n snapshot={_snap['n']}")
+
+# ======================================================================= 12 ===
+section("12. class_weight × loss ridotta a scalare — la pesatura che sparisce in silenzio")
+# `loss_regularization` compila una loss che fa `tf.reduce_mean(...)` DENTRO la funzione
+# (reg_mode='per_batch', quello delle 25 run canoniche). Keras applica `class_weight` come
+# sample_weight sul valore RESTITUITO: se quel valore e' gia' uno scalare, la pesatura
+# degenera in un fattore moltiplicativo unico e non distingue piu' le classi.
+# Le altre cinque famiglie compilano `bce` per-campione, dove invece agisce.
+try:
+    import tensorflow as _tf                                      # noqa: E402
+    import keras as _keras                                        # noqa: E402
+
+    _Xd = np.random.default_rng(0).standard_normal((96, 4)).astype("float32")
+    _yd = (np.arange(96) % 3 == 0).astype("float32")               # prevalenza 1/3
+    _CW = {0: 0.75, 1: 1.5}                                        # 'balanced' a prevalenza 1/3
+
+    def _step(loss_fn, cw):
+        _keras.utils.set_random_seed(7)
+        m = _keras.Sequential([_keras.layers.Input((4,)),
+                               _keras.layers.Dense(1, activation="sigmoid")])
+        m.compile(optimizer=_keras.optimizers.SGD(0.5), loss=loss_fn)
+        before = [w.numpy().copy() for w in m.trainable_weights]
+        m.fit(_Xd, _yd, epochs=1, batch_size=96, verbose=0, class_weight=cw)
+        return np.concatenate([(w.numpy() - b).ravel()
+                               for w, b in zip(m.trainable_weights, before)])
+
+    def _cos(loss_fn):
+        a, b = _step(loss_fn, _CW), _step(loss_fn, None)
+        return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+    _persample = _cos(lambda yt, yp: _keras.losses.binary_crossentropy(yt, yp, label_smoothing=0.02))
+    _perbatch = _cos(lambda yt, yp: _tf.reduce_mean(
+        _keras.losses.binary_crossentropy(yt, yp, label_smoothing=0.02)))
+
+    check("A. loss per-campione (5 famiglie): class_weight AGISCE", _persample < 1 - 1e-6,
+          f"cos(con CW, senza CW) = {_persample:.6f}")
+    check("B. loss ridotta a scalare (loss_regularization): class_weight INERTE",
+          _perbatch > 1 - 1e-6, f"cos(con CW, senza CW) = {_perbatch:.6f}")
+
+    # ...e il guard che da oggi lo intercetta prima del fit
+    from isic24.mod_attendance import assert_loss_is_per_sample          # noqa: E402
+
+    def _compiled(loss_fn):
+        m = _keras.Sequential([_keras.layers.Input((4,)),
+                               _keras.layers.Dense(1, activation="sigmoid")])
+        m.compile(optimizer="sgd", loss=loss_fn)
+        return m
+
+    _ps_fn = lambda yt, yp: _keras.losses.binary_crossentropy(yt, yp, label_smoothing=0.02)   # noqa: E731
+    _pb_fn = lambda yt, yp: _tf.reduce_mean(_ps_fn(yt, yp))                                   # noqa: E731
+
+    ok, msg = raises(lambda: assert_loss_is_per_sample(_compiled(_pb_fn), "loss_regularization"),
+                     ValueError)
+    check("C. il guard SOLLEVA sulla loss ridotta a scalare", ok, msg)
+    ok_d, msg_d = raises(lambda: assert_loss_is_per_sample(_compiled(_ps_fn), "per_sample"),
+                         ValueError)
+    check("D. il guard tace sulla loss per campione", not ok_d, msg_d)
+    ok_e, msg_e = raises(lambda: assert_loss_is_per_sample(
+        _compiled(_keras.losses.BinaryCrossentropy(label_smoothing=0.02)), "bce"), ValueError)
+    check("E. il guard tace su una keras.losses.Loss (pesa PRIMA di ridurre)", not ok_e, msg_e)
+except Exception as _e:                                            # noqa: BLE001
+    print(f"  (keras non disponibile: sezione saltata — {type(_e).__name__})")
+
 # =============================================================================
 shutil.rmtree(TMP, ignore_errors=True)
 n_ok = sum(1 for _, o, _ in RESULTS if o)
