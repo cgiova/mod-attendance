@@ -29,18 +29,38 @@ CANONICAL_EVAL_SET = "canonical"
 CANONICAL_FAITH_N = 128
 
 
+def _adopted_subset():
+    """Il campione XAI adottato, se c'e'.  ``(n, impronta)`` oppure ``(None, None)``.
+
+    Sta in `xai_faithfulness`, non nel namespace: `xs.adopt()` lo installa come **default
+    globale**, quindi da quel momento le misure NON sono piu' sulle prime `FAITH_N_SAMPLES`
+    righe, qualunque cosa dica quella variabile.
+    """
+    try:
+        from . import xai_faithfulness as xf
+        idx = getattr(xf, "FAITH_SUBSET_IDX", None)
+        return (len(idx) if idx is not None else None,
+                getattr(xf, "ACTIVE_SUBSET_FINGERPRINT", None))
+    except Exception:
+        return None, None
+
+
 def eval_set_descriptor(ns):
     """A short, loggable description of which rows the numbers will be computed on."""
     get = ns.get
+    n_sub, fp = _adopted_subset()
     return {
         "eval_set": get("EVAL_SET"),
         "eval_folds": list(get("EVAL_FOLDS") or []) if get("EVAL_SET") == "custom" else None,
         "faith_n_samples": get("FAITH_N_SAMPLES"),
         "n_validation": len(get("validation_df")) if get("validation_df") is not None else None,
+        "adopted_subset_n": n_sub,
+        "adopted_subset_fingerprint": fp,
     }
 
 
-def assert_canonical_eval(ns, faith_n=CANONICAL_FAITH_N, require_snapshot=True):
+def assert_canonical_eval(ns, faith_n=CANONICAL_FAITH_N, require_snapshot=True,
+                          allow_subset=False):
     """Fail loud unless `ns` is the canonical evaluation set of the primary study.
 
     ``ns`` is the namespace holding the post-hoc notebook's globals: pass ``globals()``
@@ -78,6 +98,21 @@ def assert_canonical_eval(ns, faith_n=CANONICAL_FAITH_N, require_snapshot=True):
             f"La fedelta' pubblicata integra sulle prime {faith_n} righe di validation; un n "
             f"diverso e' una misura diversa e non e' confrontabile con i numeri gia' "
             f"documentati.")
+
+    # Il punto cieco chiuso il 2026-08-04: fino a qui il guard controllava una VARIABILE
+    # (`FAITH_N_SAMPLES`) mentre cio' che decide le righe misurate e' `xf.FAITH_SUBSET_IDX`.
+    # Dopo `xs.adopt()` stampava «OK, faith_n_samples: 128» con un campione da 144 attivo:
+    # un guard che dichiara canonico un regime che non lo e' piu'.
+    if desc["adopted_subset_n"] is not None and not allow_subset:
+        raise RuntimeError(
+            f"[EVAL GUARD] c'e' un campione XAI ADOTTATO ({desc['adopted_subset_n']} righe, "
+            f"impronta {desc['adopted_subset_fingerprint']!r}), quindi le misure NON sono sulle "
+            f"prime {faith_n} righe di validation — qualunque cosa dica FAITH_N_SAMPLES.\n"
+            f"  `xs.adopt()` installa il campione come DEFAULT GLOBALE: da li' in poi "
+            f"`subset_idx=None` non significa piu' «il prefisso».\n"
+            f"  Se stai lavorando sul campione di proposito: allow_subset=True (e scrivi in una "
+            f"directory che lo dichiara). Per tornare al canonico: xf.FAITH_SUBSET_IDX = None "
+            f"e xf.ACTIVE_SUBSET_FINGERPRINT = None.")
 
     # Il set che conta e' quello DENTRO xf._CTX: e' da li' che `_build_faith_subset` pesca.
     # `ns["validation_df"]` puo' divergere se qualcuno lo ribinda dopo `xf.configure`.

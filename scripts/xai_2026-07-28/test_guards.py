@@ -251,6 +251,43 @@ if os.path.isdir(os.path.join(ART, "runs")):
 else:
     print("  (artefatti non disponibili: sezione saltata)")
 
+# ======================================================================= 10 ===
+section("10. [EVAL GUARD] — e il punto cieco sul campione adottato")
+from isic24.eval_guard import assert_canonical_eval                # noqa: E402
+
+
+def _ns(**kw):
+    return dict({"EVAL_SET": "canonical", "FAITH_N_SAMPLES": 128,
+                 "validation_df": None, "_val_snap": "/nonesistente"}, **kw)
+
+
+def _call(ns, **kw):
+    return assert_canonical_eval(ns, require_snapshot=False, **kw)
+
+
+_pf, _pi = xf.ACTIVE_SUBSET_FINGERPRINT, getattr(xf, "FAITH_SUBSET_IDX", None)
+try:
+    xf.FAITH_SUBSET_IDX, xf.ACTIVE_SUBSET_FINGERPRINT = None, None
+    ok, msg = raises(lambda: _call(_ns(EVAL_SET="custom", EVAL_FOLDS=[1, 2])))
+    check("A. EVAL_SET custom -> solleva", ok, msg)
+    ok, msg = raises(lambda: _call(_ns(FAITH_N_SAMPLES=256)))
+    check("B. FAITH_N_SAMPLES diverso -> solleva", ok, msg)
+    ok_c, msg_c = raises(lambda: _call(_ns()))
+    check("C. regime canonico -> non solleva", not ok_c, msg_c)
+
+    # il punto cieco: `xs.adopt` installa un default GLOBALE che il guard non guardava
+    xf.FAITH_SUBSET_IDX = list(range(144))
+    xf.ACTIVE_SUBSET_FINGERPRINT = "unique-equal-s0-n144-TEST"
+    ok, msg = raises(lambda: _call(_ns()))
+    check("D. campione ADOTTATO -> solleva (era il punto cieco)", ok, msg)
+    ok_e, msg_e = raises(lambda: _call(_ns(), allow_subset=True))
+    check("E. allow_subset=True -> passa", not ok_e, msg_e)
+    d = _call(_ns(), allow_subset=True)
+    check("F. il descrittore riporta il campione", d.get("adopted_subset_n") == 144,
+          f"adopted_subset_n={d.get('adopted_subset_n')}")
+finally:
+    xf.ACTIVE_SUBSET_FINGERPRINT, xf.FAITH_SUBSET_IDX = _pf, _pi
+
 # =============================================================================
 shutil.rmtree(TMP, ignore_errors=True)
 n_ok = sum(1 for _, o, _ in RESULTS if o)
