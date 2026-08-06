@@ -272,6 +272,8 @@ def shap_lore_agreement(run_dir, encoded_feature_names, k=TOP_K, lore_idx=None,
        prefisso, quindi `explained_indices` vive gia' in spazio `validation_df` ed e' il
        fallback corretto.  Sotto `MIN_OVERLAP` il risultato resta `NaN`.
     """
+    from . import xai_subset as xs
+
     p = _shap_npz(run_dir)
     lore = _lore_persample(run_dir)
     if p is None or lore is None or "rule_text" not in lore:
@@ -280,8 +282,7 @@ def shap_lore_agreement(run_dir, encoded_feature_names, k=TOP_K, lore_idx=None,
         phi = np.abs(np.asarray(z["shap_values"], float))
         # `val_index` per le run nuove, `explained_indices` per i canonici sul prefisso:
         # LORE indicizza su `validation_df`, quindi SHAP deve farlo anche lui.
-        key = "val_index" if "val_index" in z.files else "explained_indices"
-        shap_idx = np.asarray(z[key], int).ravel()
+        shap_idx, _ = xs.read_explained_index(z)
 
     # ⚠️ La colonna `i` del CSV LORE e' la posizione DENTRO il campione LORE, NON in
     # `validation_df`.  Le due cose coincidono solo se il campione LORE era il prefisso —
@@ -407,6 +408,8 @@ def setting_value(impl_name, setting_tag):
 
 
 def _run_top_k(run_dir, groups, k=TOP_K):
+    from . import xai_subset as xs
+
     p = _shap_npz(run_dir)
     if p is None:
         return None, None
@@ -416,8 +419,7 @@ def _run_top_k(run_dir, groups, k=TOP_K):
         # campione, quindi il guard sull'identita' in `stability_table` non potrebbe mai
         # scattare — due campioni diversi darebbero indici identici. Con `val_index` il
         # confronto e' sulle lesioni vere. Sui canonici (prefisso) i due coincidono.
-        key = "val_index" if "val_index" in z.files else "explained_indices"
-        idx = np.asarray(z[key], int).ravel()
+        idx, _ = xs.read_explained_index(z)
     return [raw_top_k(r, groups, k) for r in phi], idx
 
 
@@ -442,6 +444,8 @@ def stability_table(master, art_path, encoded_feature_names, k=TOP_K):
     logaritmo, ma la spaziatura fra coppie e' molto diversa e la colonna `param_a`/`param_b`
     la mette in chiaro invece di lasciarla dedurre.
     """
+    from . import xai_subset as xs
+
     g = raw_groups(encoded_feature_names)
     m = master.copy()
     m["param"] = [setting_value(i, t) for i, t in zip(m.impl_name, m.setting_tag)]
@@ -470,6 +474,10 @@ def stability_table(master, art_path, encoded_feature_names, k=TOP_K):
             for seed, gs in grp.groupby("seed"):
                 gs = gs.sort_values("param")
                 for (_, ra), (_, rb) in zip(gs.iloc[:-1].iterrows(), gs.iloc[1:].iterrows()):
+                    # Una coppia che tocca un'ablazione attraversa un confine architetturale:
+                    # il modello a un capo non ha il ramo che la metrica misura.
+                    if xs.is_ablation(impl, ra.setting_tag) or xs.is_ablation(impl, rb.setting_tag):
+                        continue
                     A, B = topk(ra.run_dir_abs), topk(rb.run_dir_abs)
                     if A is None or B is None:
                         continue
@@ -477,8 +485,12 @@ def stability_table(master, art_path, encoded_feature_names, k=TOP_K):
                                      tag_a=ra.setting_tag, tag_b=rb.setting_tag,
                                      param_a=ra.param, param_b=rb.param,
                                      stability_at_k=_jaccard_runs(A, B), k=k))
-        # (b) NULL: stesso setting, seed diversi
+        # (b) NULL: stesso setting, seed diversi. Qui la metrica e' SHAP TABELLARE, quindi
+        # cade solo il setting che spegne quel ramo: a ramo spento la top-k e' vuota e la
+        # Jaccard sarebbe forzata, non misurata.
         for tag, gt in grp.groupby("setting_tag"):
+            if xs.branch_off(impl, tag) == "tabular":
+                continue
             gt = gt.sort_values("seed")
             for (_, ra), (_, rb) in zip(gt.iloc[:-1].iterrows(), gt.iloc[1:].iterrows()):
                 A, B = topk(ra.run_dir_abs), topk(rb.run_dir_abs)
@@ -537,7 +549,7 @@ def summary_by_family(art_path, shape_df=None, stab_df=None, central=None, out_d
 
     f = os.path.join(out_dir, "faithfulness_aligned_signed_n144.csv")
     if os.path.exists(f):
-        d = pd.read_csv(f)
+        d = xs.drop_ablations(pd.read_csv(f), "faithfulness", verbose)
         if central:
             d = d[[central.get(i) == t for i, t in zip(d.impl_name, d.setting_tag)]]
         parts.append(d.groupby("impl_name").agg(
@@ -547,13 +559,15 @@ def summary_by_family(art_path, shape_df=None, stab_df=None, central=None, out_d
 
     l = os.path.join(out_dir, "lore_sa_quality_n48.csv")
     if os.path.exists(l):
-        d = pd.read_csv(l)
+        d = xs.drop_ablations(pd.read_csv(l), "lore", verbose)
+        if central:
+            d = d[[central.get(i) == t for i, t in zip(d.impl_name, d.setting_tag)]]
         parts.append(d.groupby("impl_name").agg(
             lore_coverage=("lore_coverage_5050", "mean"),
             lore_rule_len=("rule_len_5050", "mean")))
 
     if shape_df is not None and len(shape_df):
-        d = shape_df
+        d = xs.drop_ablations(shape_df, "shape", verbose)
         if central:
             d = d[[central.get(i) == t for i, t in zip(d.impl_name, d.setting_tag)]]
         agg = {"shape__shap_compactness": ("shap_compactness", "mean"),

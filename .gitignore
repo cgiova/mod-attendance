@@ -50,3 +50,4 @@ Thumbs.db
 # one-off locali
 /notebooks/modality_attendance/feature_space_guard.py
 /src/isic24/colab_bootstrap.sh
+/.claude/

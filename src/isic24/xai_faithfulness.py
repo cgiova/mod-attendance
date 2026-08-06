@@ -502,7 +502,8 @@ FAITH_BUDGETS      = (0.05, 0.10, 0.20, 0.40, 0.60)
 FAITH_METHODS      = ("tabular", "image", "joint")
 FAITH_DO_INSERTION = True          # set False if too heavy
 FAITH_N_RANDOM     = 3             # random-baseline repetitions
-FAITH_IMG_GRID     = 16            # 16x16 patches over 256x256
+FAITH_IMG_GRID     = None          # None = the native Grad-CAM grid; an int overrides it
+FAITH_CAM_STRIDE   = 32            # backbone total stride: the CAM is image_size / stride
 FAITH_IMG_REPLACE  = "blur"        # 'blur' | 'mean'
 FAITH_RNG_SEED     = 0
 FAITH_EVAL_BATCH   = 64
@@ -739,12 +740,13 @@ def _gradcam_maps(model, imgs, enc_feats, batch=None):
         w = tf.reduce_mean(grads, axis=(1, 2))                       # (b, C)
         cam = tf.nn.relu(tf.reduce_sum(conv_out * w[:, None, None, :], axis=-1))  # (b,Hc,Wc)
         cam = cam.numpy()
+        native = cam.shape[1]
         for j in range(cam.shape[0]):
             c = cam[j] - cam[j].min()
             mx = c.max()
             c = c / mx if mx > 0 else c
             maps.append(cv2.resize(c, (W, H)))
-    return np.stack(maps, 0)
+    return np.stack(maps, 0), int(native)
 
 
 def _patch_saliency_order(cams, grid):
@@ -817,7 +819,7 @@ def explanation_faithfulness(model, run_dir, best_epoch, n_samples=None, budgets
     methods = tuple(methods or FAITH_METHODS)
     do_insertion = FAITH_DO_INSERTION if do_insertion is None else do_insertion
     n_random = FAITH_N_RANDOM if n_random is None else n_random
-    grid = grid or FAITH_IMG_GRID
+    grid = grid or FAITH_IMG_GRID          # None here: resolved from the CAM below
     rng = np.random.default_rng(FAITH_RNG_SEED if rng_seed is None else rng_seed)
     q_grid = np.array((0.0,) + budgets, dtype=np.float64)
 
@@ -837,16 +839,24 @@ def explanation_faithfulness(model, run_dir, best_epoch, n_samples=None, budgets
             imgs, labs = imgs[ei], labs[ei]
             tab_imp = _persample_raw_importance(sv)[:len(raw_df)]
     n = len(raw_df)
-    n_raw, n_patches = len(_CTX.feat_cols), grid * grid
+    n_raw = len(_CTX.feat_cols)
 
     enc_orig = _encode_raw(raw_df)
     s_orig = _score_logit(model, enc_orig, imgs)
     preds_orig = 1.0 / (1.0 + np.exp(-s_orig))
 
     if need_img:
-        cams = _gradcam_maps(model, imgs, enc_orig)
+        cams, cam_grid = _gradcam_maps(model, imgs, enc_orig)
+        grid = cam_grid if grid is None else int(grid)
+        if grid > cam_grid:
+            raise ValueError(
+                f"[FAITH IMG GRID] grid={grid} over a {cam_grid}x{cam_grid} Grad-CAM: ranking "
+                f"{grid * grid} patches from {cam_grid ** 2} numbers is nominal precision, not "
+                f"measured. Leave FAITH_IMG_GRID=None to follow the CAM, or raise image_size "
+                f"(the CAM is image_size / {FAITH_CAM_STRIDE}).")
         img_order_exp = _patch_saliency_order(cams, grid)
         repl = _image_replacement(imgs, sigma=blur_sigma)
+    n_patches = (grid or 0) ** 2
 
     def _tab_order(exp):
         if exp:

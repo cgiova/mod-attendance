@@ -507,6 +507,45 @@ SIGNED_MODES_REPORT = ("posev", "negev", "target")   # `abs` e' il modo-artefatt
 Q_CLEAN = 0.20                                       # full budget e' OOD-dominato
 
 
+# --------------------------------------------------------------------------------------
+# Ablazioni unimodali — la regola, non una nota in un documento
+# --------------------------------------------------------------------------------------
+# Agli endpoint di uno sweep un ramo e' SPENTO per costruzione: i loro valori di
+# spiegazione sono algebra, non misura (`lore_coverage` esattamente 0.000 e 1.000, massa
+# SHAP esattamente 0). Sono ablazioni, non punti dello sweep, e non entrano in nessuna
+# media di famiglia. Chi aggiunge una famiglia con endpoint la dichiara QUI: e' l'unico
+# posto che le aggregazioni consultano.
+ABLATION_SETTINGS = {
+    ("fixed_scaling", "a0p000"): "tabular",     # alpha=0 -> ramo tabellare spento
+    ("fixed_scaling", "a1p000"): "image",       # alpha=1 -> ramo immagine spento
+}
+
+
+def branch_off(impl_name, setting_tag):
+    """Quale ramo spegne questa ablazione, o ``None`` se il setting non e' un'ablazione."""
+    return ABLATION_SETTINGS.get((str(impl_name), str(setting_tag)))
+
+
+def is_ablation(impl_name, setting_tag):
+    return branch_off(impl_name, setting_tag) is not None
+
+
+def drop_ablations(df, where="", verbose=True):
+    """Toglie le ablazioni unimodali da una tabella per-run prima di aggregarla.
+
+    Da chiamare in ogni punto che fa `groupby("impl_name")`. Su ISIC sposta la media AUC di
+    `fixed_scaling` da 0.8974 a 0.9014 e la sua `lore_coverage` di famiglia da un valore che
+    contiene 0.000 e 1.000 a uno che non li contiene.
+    """
+    if not len(df) or "impl_name" not in df.columns or "setting_tag" not in df.columns:
+        return df
+    keep = [not is_ablation(i, t) for i, t in zip(df["impl_name"], df["setting_tag"])]
+    n = len(keep) - sum(keep)
+    if n and verbose:
+        print(f"  [ablations] {where}: {n} run di endpoint unimodale escluse dall'aggregato")
+    return df[keep]
+
+
 def _run_gains(run_dir, prefix="faithfulness_aligned_signed", modes=("abs",) + SIGNED_MODES_REPORT):
     """Tutti i gain di una run, CON le convenzioni di segno gia' applicate.
 
@@ -615,10 +654,10 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
                 sel = faith[[central.get(i) == t
                              for i, t in zip(faith.impl_name, faith.setting_tag)]]
             else:
-                sel = faith
+                sel = drop_ablations(faith, "faithfulness", verbose)
                 if verbose:
-                    print("  ⚠ central=None: la media di famiglia include TUTTI i setting, "
-                          "anche quelli degeneri")
+                    print("  ⚠ central=None: la media di famiglia include tutti i setting "
+                          "dello sweep (le ablazioni unimodali sono comunque escluse)")
             col = f"target_del_q{int(Q_CLEAN * 100)}norm"
             order = sel.groupby("impl_name")[col].mean().sort_values().index.tolist()
             out["central"], out["order"] = sel, order
@@ -667,8 +706,9 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
             sfx = _sfx(lore)
             p = os.path.join(out_dir, f"lore_sa_quality{sfx}.csv")
             lore.to_csv(p, index=False); written.append(p)
-            lo = lore.groupby("impl_name")[["lore_coverage", "lore_coverage_5050",
-                                            "rule_len", "rule_len_5050"]].mean()
+            lo = (drop_ablations(lore, "lore", verbose)
+                  .groupby("impl_name")[["lore_coverage", "lore_coverage_5050",
+                                         "rule_len", "rule_len_5050"]].mean())
             lo = lo.reindex([f for f in out.get("order", lo.index) if f in lo.index])
             fig, axes = plt.subplots(1, 2, figsize=(11, 4.4))
             for ax, (raw, bal, name) in zip(axes, [
@@ -718,6 +758,60 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
     return out
 
 
+# --------------------------------------------------------------------------------------
+# Gli indici delle righe spiegate — UNA funzione, due spazi tenuti distinti
+# --------------------------------------------------------------------------------------
+# `explained_indices` e' la posizione DENTRO il campione (0..n-1), qualunque sia il
+# campione. `val_index` e' la posizione in `validation_df`. Hanno nomi simili, sono interi
+# della stessa taglia, e incrociarli non solleva: ha gia' prodotto tre difetti distinti.
+# Chi vuole gli indici li chiede QUI e riceve anche lo spazio in cui vivono.
+
+def read_explained_index(npz_or_df, allow_prefix=True):
+    """``(indici in validation_df, provenienza)`` da un npz o da un CSV per campione.
+
+    ``provenienza`` e' ``"val_index"`` quando l'artefatto lo registra, e
+    ``"prefix"`` quando si ricade su ``explained_indices``: quei valori coincidono con le
+    posizioni di validation SOLO sugli artefatti storici, dove il campione era il prefisso.
+    Restituisce ``(None, "unknown")`` se l'artefatto non dice quali righe ha spiegato —
+    "non lo so" non e' "non corrisponde", e chi chiama decide.
+    """
+    keys = (npz_or_df.files if hasattr(npz_or_df, "files")
+            else list(getattr(npz_or_df, "columns", [])))
+    get = ((lambda k: np.asarray(npz_or_df[k], int).ravel()) if hasattr(npz_or_df, "files")
+           else (lambda k: npz_or_df[k].to_numpy().astype(int).ravel()))
+    if "val_index" in keys:
+        return get("val_index"), "val_index"
+    if allow_prefix and "explained_indices" in keys:
+        return get("explained_indices"), "prefix"
+    return None, "unknown"
+
+
+def isic_ids_for(idx, validation_df):
+    """Gli `isic_id` alle posizioni date: l'identita' che sopravvive a un cambio di ordine."""
+    return validation_df["isic_id"].to_numpy()[np.asarray(idx, int)]
+
+
+def index_for_isic_ids(ids, validation_df):
+    """Posizioni in `validation_df` di questi `isic_id`, con i due modi di sbagliare chiusi.
+
+    Il validation e' ricampionato: 291 righe sono duplicati, quindi `isic_id` -> posizione
+    non e' iniettivo. Un id duplicato o assente solleva invece di risolversi in silenzio
+    nella prima occorrenza.
+    """
+    col = validation_df["isic_id"].to_numpy()
+    pos = {}
+    dup = set()
+    for i, v in enumerate(col):
+        (dup.add(v) if v in pos else pos.setdefault(v, i))
+    want = list(ids)
+    missing = [v for v in want if v not in pos]
+    ambiguous = [v for v in want if v in dup]
+    if missing or ambiguous:
+        raise KeyError(f"isic_id assenti dal validation: {missing[:5]} | "
+                       f"duplicati (posizione non definita): {ambiguous[:5]}")
+    return np.asarray([pos[v] for v in want], int)
+
+
 def sample_matches(run_dir, kind, expected_idx):
     """Gli artefatti di `kind` sono stati calcolati SU QUESTI campioni?  (True/False/None)
 
@@ -739,30 +833,27 @@ def sample_matches(run_dir, kind, expected_idx):
         if not hits:
             return None
         import pandas as pd
-        df = pd.read_csv(hits[-1])
-        if "val_index" not in df.columns:
+        got, src = read_explained_index(pd.read_csv(hits[-1]), allow_prefix=False)
+        if got is None:
             return None
-        got = df["val_index"].to_numpy()
     elif kind == "shap_tab":
         hits = sorted(_glob.glob(os.path.join(d, "epoch_*", "shap_arrays_epoch_*.npz")))
         if not hits:
             return None
         with np.load(hits[-1]) as z:
-            # `explained_indices` sono posizioni DENTRO il campione (`0..n-1`) per
-            # QUALUNQUE campione: confrontarle con `expected_idx`, che vive in spazio
-            # `validation_df`, dava **sempre** False — cioe' "rifai tutto" su artefatti
-            # sani. Come per gli altri due kind, l'assenza di `val_index` e' "non lo so".
-            if "val_index" not in z.files:
+            # allow_prefix=False: `explained_indices` vive in un altro spazio, e
+            # confrontarlo con `expected_idx` dava sempre False su artefatti sani.
+            got, src = read_explained_index(z, allow_prefix=False)
+            if got is None:
                 return None
-            got = np.asarray(z["val_index"], int).ravel()
     elif kind == "gradcam_img":
         hits = sorted(_glob.glob(os.path.join(d, "gradcam_arrays*_epoch_*.npz")))
         if not hits:
             return None
         with np.load(hits[-1]) as z:
-            if "val_index" not in z.files:
+            got, src = read_explained_index(z, allow_prefix=False)
+            if got is None:
                 return None
-            got = np.asarray(z["val_index"], int).ravel()
     else:
         return None
     return len(got) == len(exp) and bool(np.array_equal(np.sort(got), np.sort(exp)))

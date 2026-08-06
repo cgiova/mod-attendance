@@ -30,6 +30,11 @@ from keras.callbacks import Callback
 
 PLOT_SHOW = True
 
+# The Grad-CAM grid is `image_size / 32`: 8x8 at 256 px. Trimming a 1-pixel border to avoid
+# padding artifacts costs 44% of the cells at that size, and gives the engine a different map
+# from the one the faithfulness path scores. One map, untrimmed, is the default.
+TRIM_CAM_BORDER = False
+
 
 def append_epoch_row(path, row, key="epoch"):
     """Append one per-epoch row, REPLACING any existing row for the same epoch.
@@ -887,10 +892,12 @@ class MultiModalGradCAMEngine:
         conv_np = conv_outputs.numpy() if isinstance(conv_outputs, tf.Tensor) else conv_outputs
         grads_np = grads.numpy() if isinstance(grads, tf.Tensor) else grads
         B = conv_np.shape[0]
+        # Trimming the border removes the outer ring of an already tiny grid — at 256 px the CAM
+        # is 8x8, so 28 of 64 cells go — and the faithfulness path scores the untrimmed map.
+        sl = slice(1, -1) if TRIM_CAM_BORDER else slice(None)
         for i in range(B):
-            # exclude 1-pixel border to avoid padding artifacts
-            gr = grads_np[i][1:-1, 1:-1, :]
-            co = conv_np[i][1:-1, 1:-1, :]
+            gr = grads_np[i][sl, sl, :]
+            co = conv_np[i][sl, sl, :]
             weights = gr.mean(axis=(0, 1))  # (C,)
             cam = (co * weights[None, None, :]).sum(axis=-1)
             cam = np.maximum(cam, 0.0)

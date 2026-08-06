@@ -285,6 +285,29 @@ try:
     d = _call(_ns(), allow_subset=True)
     check("F. il descrittore riporta il campione", d.get("adopted_subset_n") == 144,
           f"adopted_subset_n={d.get('adopted_subset_n')}")
+
+    # Lo snapshot: la politica dipende da CHI l'ha scritto. Dal 2026-08-06 quello su disco
+    # viene dal riallenamento (`source='training_run'`), quindi il ramo che conta e' il raise.
+    xf.FAITH_SUBSET_IDX, xf.ACTIVE_SUBSET_FINGERPRINT = None, None
+    _vdf = pd.DataFrame({"isic_id": [f"ISIC_{i:07d}" for i in range(10)]})
+
+    def _snap_ns(source, ids):
+        path = os.path.join(TMP, f"snap_{source}.json")
+        import json as _json
+        _json.dump({"seed": 49, "n": len(ids), "source": source, "isic_ids_sorted": sorted(ids)},
+                   open(path, "w"))
+        return _ns(validation_df=_vdf, _val_snap=path)
+
+    _same = _vdf.isic_id.tolist()
+    _other = [f"ISIC_{i:07d}" for i in range(1, 11)]
+    ok, msg = raises(lambda: _call(_snap_ns("training_run", _other)))
+    check("G. snapshot da un training run + set diverso -> SOLLEVA", ok, msg)
+    ok_h, msg_h = raises(lambda: _call(_snap_ns("posthoc_regen_2026-07-28", _other)))
+    check("H. snapshot rigenerato post-hoc + set diverso -> warn, non solleva", not ok_h, msg_h)
+    d = _call(_snap_ns("training_run", _same))
+    check("I. snapshot da un training run + set uguale -> passa e lo registra",
+          d.get("snapshot_match") is True and d.get("snapshot_source") == "training_run",
+          f"match={d.get('snapshot_match')}, source={d.get('snapshot_source')}")
 finally:
     xf.ACTIVE_SUBSET_FINGERPRINT, xf.FAITH_SUBSET_IDX = _pf, _pi
 
@@ -455,6 +478,223 @@ try:
     check("E. il guard tace su una keras.losses.Loss (pesa PRIMA di ridurre)", not ok_e, msg_e)
 except Exception as _e:                                            # noqa: BLE001
     print(f"  (keras non disponibile: sezione saltata — {type(_e).__name__})")
+
+# ======================================================================= 13 ===
+section("13. decomposizione esatta del logit — le sei teste, e quella che non si decompone")
+# La misura di attendance esatta dello studio poggia su una sola proprieta': la testa e'
+# additiva, quindi z = b + c_img + c_tab senza residuo. Qui le sei topologie sono
+# ricostruite in miniatura (backbone finto, stessa testa) e la ricostruzione deve tornare a
+# meno del rumore float; una testa con un MLP dopo la fusione deve invece far sollevare.
+try:
+    import keras as _k                                             # noqa: E402
+    from isic24 import xai_logit as xlog                           # noqa: E402
+    from isic24.mod_attendance import (ConstantScale, FusionWithGamma,  # noqa: E402
+                                       GateEntropyLoss, LearnableAlpha, ScalarMultiply)
+
+    _IMG, _FEAT, _NB = (16, 16, 3), 12, 6
+    _rb = np.random.default_rng(3)
+    _xb = {"images": _rb.random((_NB, *_IMG)).astype("float32"),
+           "features": _rb.normal(size=(_NB, _FEAT)).astype("float32")}
+
+    def _toy(kind, alpha=0.3, gamma_img=1.0, img_dim=None):
+        img_in = _k.Input(shape=_IMG, name="images")
+        f_in = _k.Input(shape=(_FEAT,), name="features")
+        x1 = _k.layers.GlobalAveragePooling2D()(_k.layers.Conv2D(20, 3, padding="same")(img_in))
+        x1 = _k.layers.Dropout(0.2)(x1)
+        if img_dim:
+            x1 = _k.layers.Dense(img_dim, activation="selu", name="img_proj")(x1)
+        x2 = _k.layers.Dense(9, activation="selu")(f_in)
+        x2 = _k.layers.Dense(16, activation="selu")(x2)
+        x2 = _k.layers.Dropout(0.1)(x2)
+
+        if kind == "fixed_scaling":
+            x1 = ConstantScale(1.0 - alpha, name="image_weighting")(x1)
+            x2 = ConstantScale(alpha, name="tabular_weighting")(x2)
+        elif kind == "learnable_scaling":
+            a, b = LearnableAlpha(init_alpha=0.4, name="learnable_alpha")(x1)
+            x1 = ScalarMultiply(name="image_weighting")([x1, b])
+            x2 = ScalarMultiply(name="tabular_weighting")([x2, a])
+
+        if kind == "controlled_fusion":
+            fused = FusionWithGamma(gamma_img=gamma_img, gamma_tab=1.0,
+                                    name="fusion_with_gamma")([x1, x2])
+        elif kind == "adaptive_gating":
+            x1 = _k.layers.Dense(24, activation="selu", name="img_emb")(x1)
+            x2 = _k.layers.Dense(24, activation="selu", name="tab_emb")(x2)
+            g = _k.layers.Dense(8, activation="relu")(_k.layers.Concatenate()([x1, x2]))
+            g = GateEntropyLoss(weight=1e-4)(_k.layers.Dense(2, activation="softmax")(g))
+            fused = _k.layers.Add(name="fused")([
+                _k.layers.Multiply(name="weighted_img")([x1, _k.layers.Lambda(lambda w: w[:, 0:1])(g)]),
+                _k.layers.Multiply(name="weighted_tab")([x2, _k.layers.Lambda(lambda w: w[:, 1:2])(g)])])
+        else:
+            fused = _k.layers.Concatenate(name="concat")([x1, x2])
+
+        if kind == "nonadditive":
+            fused = _k.layers.Dense(8, activation="selu")(fused)
+        out = _k.layers.Dense(1, activation="sigmoid", name="output")(fused)
+        return _k.Model({"images": img_in, "features": f_in}, out, name=kind)
+
+    for _fam, _kind in [("vanilla", "Concatenate"), ("loss_regularization", "Concatenate"),
+                        ("fixed_scaling", "Concatenate"), ("learnable_scaling", "Concatenate"),
+                        ("controlled_fusion", "FusionWithGamma"), ("adaptive_gating", "Add")]:
+        _m = _toy(_fam, img_dim=16 if _fam == "controlled_fusion" else None)
+        _d, _meta = xlog.contributions(_m, _xb)
+        check(f"B. {_fam}: la testa e' {_kind} e il logit si ricompone",
+              _meta["head_kind"] == _kind and _meta["recon_max_abs_delta"] < xlog.RECON_TOL,
+              f"{_meta['head_kind']}, delta={_meta['recon_max_abs_delta']:.1e}")
+
+    _mn = _toy("nonadditive")
+    _okn, _msgn = raises(lambda: xlog.contributions(_mn, _xb, check_order=False),
+                         (AssertionError, ValueError))
+    check("A. testa non additiva (MLP dopo la fusione): SOLLEVA", _okn, _msgn)
+
+    # Caso C: i gamma di FusionWithGamma sono PESI non addestrabili, e get_config() riporta
+    # il valore di costruzione. Lo sweep gamma post-hoc scrive il peso: chi legge il config
+    # non se ne accorge e attribuisce al ramo un contributo che il modello non calcola.
+    _mg = _toy("controlled_fusion", img_dim=16)
+    _b0, _ = xlog.contributions(_mg, _xb, check_order=False)
+    _mg.get_layer("fusion_with_gamma").gamma_img.assign(2.0)
+    _b1, _meta1 = xlog.contributions(_mg, _xb, check_order=False)
+    check("C. gamma letto dal PESO, non da get_config()",
+          np.allclose(_b1["image_logit_raw"], 2 * _b0["image_logit_raw"], rtol=1e-4)
+          and _meta1["recon_max_abs_delta"] < xlog.RECON_TOL,
+          f"config={_mg.get_layer('fusion_with_gamma').get_config()['gamma_img']}, "
+          f"peso=2.0, delta={_meta1['recon_max_abs_delta']:.1e}")
+
+    _mv = _toy("vanilla")
+    _okv, _msgv = raises(lambda: xlog.assert_branch_order(_mv, xlog.head_split(_mv), _xb),
+                         AssertionError)
+    check("D. ordine dei rami confermato su una topologia viva", not _okv, _msgv)
+    _md = _toy("fixed_scaling", alpha=1.0)                       # ramo immagine scalato a 0
+    _okd, _msgd = raises(lambda: xlog.assert_branch_order(_md, xlog.head_split(_md), _xb),
+                         AssertionError)
+    check("E. ramo immagine morto (alpha=1): SOLLEVA invece di misurare zero", _okd, _msgd)
+except Exception as _e:                                            # noqa: BLE001
+    print(f"  (keras non disponibile: sezione saltata — {type(_e).__name__}: {_e})")
+
+# ======================================================================= 14 ===
+section("14. ablazioni unimodali — la regola sta nel CODICE, non nel documento")
+# Agli endpoint di uno sweep un ramo e' spento per costruzione: i loro valori di spiegazione
+# sono algebra. La regola vive in `xs.ABLATION_SETTINGS` e deve valere in OGNI punto che
+# aggrega per famiglia. Caso C: un `groupby` secco (il codice di prima) non se ne accorge.
+_ab = pd.DataFrame({
+    "impl_name": ["fixed_scaling"] * 4 + ["vanilla"],
+    "setting_tag": ["a0p000", "a0p500", "a1p000", "a0p750", "baseline"],
+    "seed": [47] * 5,
+    "lore_coverage": [0.0, 0.5, 1.0, 0.8, 0.7],
+})
+check("A. gli endpoint sono riconosciuti come ablazioni",
+      xs.is_ablation("fixed_scaling", "a0p000") and xs.is_ablation("fixed_scaling", "a1p000")
+      and not xs.is_ablation("fixed_scaling", "a0p500"))
+check("B. `branch_off` dice QUALE ramo spegne",
+      xs.branch_off("fixed_scaling", "a0p000") == "tabular"
+      and xs.branch_off("fixed_scaling", "a1p000") == "image"
+      and xs.branch_off("vanilla", "baseline") is None)
+
+_kept = xs.drop_ablations(_ab, "test", verbose=False)
+check("C. drop_ablations toglie 2 righe su 5 e sposta la media",
+      len(_kept) == 3
+      and abs(_kept.lore_coverage.mean() - 2 / 3) < 1e-9
+      and abs(_ab.lore_coverage.mean() - 0.60) < 1e-9,
+      f"n={len(_kept)}, media {_kept.lore_coverage.mean():.3f} contro {_ab.lore_coverage.mean():.3f}")
+check("D. il groupby secco (codice di prima) NON se ne accorge",
+      abs(_ab.groupby("impl_name").lore_coverage.mean()["fixed_scaling"] - 0.575) < 1e-9,
+      "0.575 contro 0.650 filtrando: e' il difetto che il caso C misura")
+check("E. una tabella senza le colonne di identita' passa intatta",
+      len(xs.drop_ablations(pd.DataFrame({"x": [1, 2]}), "test", verbose=False)) == 2)
+
+# ======================================================================= 17 ===
+section("17. indici — una sola funzione, e l'identita' per isic_id")
+# `explained_indices` (posizione DENTRO il campione) e `val_index` (posizione in
+# validation_df) hanno nomi simili e sono interi della stessa taglia: incrociarli non
+# solleva, e ha gia' prodotto tre difetti. La lettura sta in un posto solo.
+_p_idx = os.path.join(TMP, "idx.npz")
+np.savez(_p_idx, explained_indices=np.arange(4), val_index=np.array([10, 20, 30, 40]))
+with np.load(_p_idx) as _z:
+    _i, _src = xs.read_explained_index(_z)
+    check("A. con val_index si legge quello", _src == "val_index" and _i.tolist() == [10, 20, 30, 40])
+np.savez(_p_idx, explained_indices=np.arange(4))
+with np.load(_p_idx) as _z:
+    _i, _src = xs.read_explained_index(_z)
+    check("B. senza val_index si ricade sul prefisso, DICHIARANDOLO", _src == "prefix")
+    _i2, _src2 = xs.read_explained_index(_z, allow_prefix=False)
+    check("C. allow_prefix=False -> 'non lo so', non un indovinello",
+          _i2 is None and _src2 == "unknown")
+
+_vdf = pd.DataFrame({"isic_id": ["A", "B", "C", "B"]})     # validation ha righe duplicate
+check("D. isic_ids_for e index_for_isic_ids sono inverse sulle righe uniche",
+      xs.index_for_isic_ids(["C", "A"], _vdf).tolist() == [2, 0]
+      and xs.isic_ids_for([2, 0], _vdf).tolist() == ["C", "A"])
+_okd, _msgd = raises(lambda: xs.index_for_isic_ids(["B"], _vdf), KeyError)
+check("E. un isic_id duplicato SOLLEVA invece di prendere la prima occorrenza", _okd, _msgd)
+_oke, _msge = raises(lambda: xs.index_for_isic_ids(["Z"], _vdf), KeyError)
+check("F. un isic_id assente solleva", _oke, _msge)
+
+# ======================================================================= 16 ===
+section("16. griglia dell'immagine — un solo percorso, e nessuna precisione nominale")
+# Il motore ritagliava il bordo (6x6) mentre la fedelta' ordinava le patch sulla mappa piena
+# (8x8): 28 celle su 64 diverse, presentate come la stessa mappa. E FAITH_IMG_GRID era 16
+# fisso, cioe' 256 patch ordinate a partire da 64 numeri.
+from isic24 import xai_engines as xe                            # noqa: E402
+
+check("A. il motore NON ritaglia piu' il bordo di default", xe.TRIM_CAM_BORDER is False)
+check("B. FAITH_IMG_GRID segue la CAM invece di essere fisso", xf.FAITH_IMG_GRID is None,
+      f"FAITH_IMG_GRID={xf.FAITH_IMG_GRID}")
+
+_cams = rng.random((3, 256, 256))
+for _g in (8, 16):
+    _o = xf._patch_saliency_order(_cams, _g)
+    check(f"C{_g}. l'ordinamento su griglia {_g}x{_g} copre tutte le patch una volta",
+          _o.shape == (3, _g * _g) and all(sorted(r.tolist()) == list(range(_g * _g)) for r in _o))
+
+# Il guard che rifiuta una griglia piu' fine della CAM: si esercita sulla sola condizione,
+# senza modello, perche' e' quella la regola.
+def _grid_guard(grid, cam_grid):
+    if grid > cam_grid:
+        raise ValueError("[FAITH IMG GRID] nominal precision")
+    return grid
+
+
+ok, msg = raises(lambda: _grid_guard(16, 8), ValueError)
+check("D. grid piu' fine della CAM -> solleva", ok, msg)
+ok_e, _ = raises(lambda: _grid_guard(8, 8), ValueError)
+check("E. grid uguale alla CAM -> passa", not ok_e)
+
+# ======================================================================= 15 ===
+section("15. pre-flight della sonda shuffle — i nomi che usa sono quelli che dichiara")
+# La sonda vive in coda al notebook di training e riusa builder e runner, che stanno sopra
+# @@STOP@@. Il suo `_NEEDED` dice quale cella lanciare per ciascun nome: se qualcuno tocca la
+# cella e introduce un nome non dichiarato, l'errore torna a essere un NameError opaco.
+import ast as _ast                                              # noqa: E402
+import builtins as _bi                                          # noqa: E402
+import json as _js                                              # noqa: E402
+
+_nbp = os.path.join(BASE, "notebooks", "modality_attendance",
+                    "isic24_modality_attendance_train.ipynb")
+_cells = [''.join(c["source"]) for c in _js.load(open(_nbp))["cells"]
+          if c["cell_type"] == "code"]
+_probe = [c for c in _cells if c.startswith("# @@PROBE_SHUFFLE_FIXED@@")]
+check("A. la cella @@PROBE_SHUFFLE_FIXED@@ esiste ed e' unica", len(_probe) == 1, f"n={len(_probe)}")
+
+if len(_probe) == 1:
+    _t = _ast.parse(_probe[0])
+    _load, _store = set(), set()
+    for _n in _ast.walk(_t):
+        if isinstance(_n, _ast.Name):
+            (_load if isinstance(_n.ctx, _ast.Load) else _store).add(_n.id)
+        elif isinstance(_n, (_ast.FunctionDef, _ast.ClassDef)):
+            _store.add(_n.name)
+        elif isinstance(_n, _ast.Lambda):
+            _store.update(a.arg for a in _n.args.args)
+    _free = _load - _store - set(dir(_bi))
+    _needed = _ast.literal_eval(_probe[0].split("_NEEDED = ")[1].split("\n_missing")[0])
+    check("B. ogni nome libero e' dichiarato in _NEEDED", not (_free - set(_needed)),
+          f"scoperti: {sorted(_free - set(_needed))}" if _free - set(_needed) else f"{len(_free)} nomi")
+
+    # ...e ogni marcatore citato deve esistere davvero nel notebook
+    _text = "\n".join(_cells)
+    _absent = sorted(m for m in set(_needed.values()) if m not in _text)
+    check("C. i marcatori citati dal pre-flight esistono nel notebook", not _absent, str(_absent))
 
 # =============================================================================
 shutil.rmtree(TMP, ignore_errors=True)
