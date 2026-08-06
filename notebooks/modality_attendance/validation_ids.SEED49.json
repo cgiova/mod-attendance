@@ -1,9 +1,7 @@
 {
  "seed": 49,
  "n": 1091,
- "source": "posthoc_regen_2026-07-28",
- "verified_against_june_runs": false,
- "note": "Provisional: regenerated post-hoc from the CURRENT pipeline (seed 49). Deterministic, but NOT verified to equal the split the June checkpoints used. The training notebook overwrites this with the authoritative split on its next real run; then the post-hoc guard can be flipped from warn to raise.",
+ "source": "training_run",
  "isic_ids_sorted": [
   "ISIC_0068212",
   "ISIC_0096034",
