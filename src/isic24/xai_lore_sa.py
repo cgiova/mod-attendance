@@ -591,7 +591,11 @@ def _lore_sa_callback_cls():
             # e' piu' vera. Serve a chiunque debba riallineare LORE con SHAP o la fedelta'
             # (`xai_metrics.shap_lore_agreement`).
             if self.subset_idx is not None and len(self.subset_idx) >= len(df):
-                df.insert(1, "val_index", np.asarray(self.subset_idx, int)[:len(df)])
+                from . import xai_subset as xs
+                vi = np.asarray(self.subset_idx, int)[:len(df)]
+                df.insert(1, "val_index", vi)
+                for k, v in xs.stamp_row_ids(vi).items():   # l'identita', se il fold e' noto
+                    df.insert(1, k, v)
             df.to_csv(out_dir / f"lore_sa_persample_{epoch_name}.csv", index=False)
 
             self.last_quality = {

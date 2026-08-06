@@ -596,6 +596,13 @@ class ShapCallback(Callback):
         epoch_dir = self.base_dir / epoch_name
         epoch_dir.mkdir(parents=True, exist_ok=True)
 
+        from . import xai_subset as xs
+        # Le righe di validation spiegate, e la loro identita': `explained_indices` sono
+        # posizioni DENTRO il campione, quindi da sole non dicono quali lesioni siano.
+        vi = (None if self.subset_idx is None
+              else np.asarray(self.subset_idx, int)[
+                  np.asarray(stats["explained_indices"], int)])
+
         # Persist arrays + tabular share for post-hoc analysis
         np.savez_compressed(
             epoch_dir / f"shap_arrays_{epoch_name}.npz",
@@ -609,18 +616,16 @@ class ShapCallback(Callback):
             # questa un npz non e' distinguibile da uno prodotto su altre righe.
             **({} if self.subset_fingerprint is None
                else {"subset_fingerprint": str(self.subset_fingerprint)}),
-            # La POSIZIONE IN `validation_df` di ogni campione spiegato — la stessa chiave,
-            # con lo stesso significato, che scrivono Grad-CAM (`gradcam_arrays_*.npz`) e
-            # LORE (colonna `val_index` nel per-sample CSV).
+            # La POSIZIONE IN `validation_df` di ogni campione spiegato, e il suo id di riga
+            # — le stesse due chiavi, con lo stesso significato, che scrivono Grad-CAM
+            # (`gradcam_arrays_*.npz`), LORE (per-sample CSV) e la fedelta'.
             #
-            # Serve perche' `explained_indices` NON e' quella cosa: sono posizioni DENTRO il
-            # campione (0..n-1), quindi due motori sullo stesso campione producono indici
+            # Servono perche' `explained_indices` NON e' quella cosa: sono posizioni DENTRO
+            # il campione (0..n-1), quindi due motori sullo stesso campione producono indici
             # che si somigliano e non sono confrontabili. E' esattamente il modo in cui
-            # l'accordo SHAP<->LORE usciva NaN. Con `val_index` i tre motori si riallineano
-            # per costruzione, senza dover sapere come e' stato costruito il campione.
-            **({} if self.subset_idx is None
-               else {"val_index": np.asarray(self.subset_idx, int)[
-                   np.asarray(stats["explained_indices"], int)]}),
+            # l'accordo SHAP<->LORE usciva NaN. E la posizione da sola non sopravvive a una
+            # ricostruzione del fold: l'identita' si', ed e' `row_id`.
+            **({} if vi is None else {"val_index": vi, **xs.stamp_row_ids(vi)}),
         )
 
         # Tabular share = sum |SHAP| over tabular dims / total. Here all encoded features
@@ -1081,13 +1086,15 @@ class MultiModalGradCAMCallback(Callback):
 
             # LE HEATMAP GREZZE: precondizione di ogni metrica sul lato immagine. Da un PNG
             # con la colormap applicata non si ricava ne' entropia ne' area ne' IoU.
-            # `val_index` le accompagna per lo stesso motivo per cui accompagna le regole
-            # LORE: senza, non si sa QUALI lesioni sono state spiegate.
+            # `val_index` e `row_id` le accompagnano per lo stesso motivo per cui
+            # accompagnano le regole LORE: senza, non si sa QUALI lesioni sono spiegate.
+            from . import xai_subset as xs
+            vi = (None if self.subset_idx is None
+                  else np.asarray(self.subset_idx, int)[:len(cams)])
             np.savez_compressed(
                 self.save_dir / f"gradcam_arrays{sfx}_epoch_{epoch:03d}.npz",
                 cams=by_mode[mode], preds=np.asarray(preds, np.float32), mode=mode,
-                **({} if self.subset_idx is None
-                   else {"val_index": np.asarray(self.subset_idx, int)[:len(cams)]}),
+                **({} if vi is None else {"val_index": vi, **xs.stamp_row_ids(vi)}),
                 **({} if self.subset_fingerprint is None
                    else {"subset_fingerprint": str(self.subset_fingerprint)}))
 

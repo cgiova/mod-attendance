@@ -212,8 +212,7 @@ def decompose_run(run_dir, art_path, subset_idx=None, batch=None, labels=None,
     df = _target_aligned(df, labels)
 
     idx = np.arange(len(df)) if subset_idx is None else np.asarray(subset_idx, int)
-    raw = xf._CTX.validation_df.reset_index(drop=True).iloc[idx]
-    df.insert(0, "isic_id", raw["isic_id"].to_numpy())
+    df.insert(0, xs.ROW_ID_KEY, xs.stamp_row_ids(idx)[xs.ROW_ID_KEY])
     df.insert(1, "val_index", idx)
     df.insert(0, "run_id", cfg.get("run_id", os.path.basename(abs_dir)))
     for k, v in meta.items():
@@ -233,7 +232,9 @@ def _run_row(df):
     return dict(
         run_id=df["run_id"].iat[0], head_kind=df["head_kind"].iat[0],
         n_samples=len(df), n_positive_rows=int(pos.sum()),
-        n_unique_lesions=int(df["isic_id"].nunique()),
+        # `read_explained_ids` e non la colonna a mano: i CSV gia' su disco portano
+        # `isic_id`, quelli nuovi `row_id`, e la lettura dei due sta in un posto solo.
+        n_unique_lesions=int(np.unique(xs.read_explained_ids(df)).size),
         image_head_dim=int(df["image_head_dim"].iat[0]),
         tabular_head_dim=int(df["tabular_head_dim"].iat[0]),
         mean_abs_image_logit_centered=img.abs().mean(),

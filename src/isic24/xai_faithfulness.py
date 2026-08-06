@@ -25,6 +25,7 @@ import pandas as pd
 
 import matplotlib.pyplot as plt
 
+from . import paths as _paths
 from .xai_engines import _finalize_plot, encoded_indices_for_raw
 
 
@@ -75,6 +76,10 @@ def configure(ctx: XaiContext, **overrides) -> None:
     # The baseline is a lazily-cached function of training_df; a new context (different
     # eval set, different resampling) must not silently reuse the previous one.
     _FAITH_TAB_BASELINE = None
+    # Declares which validation the artifacts of this session belong to: it is what lets
+    # every engine stamp row identity without knowing anything about the dataset.
+    from . import xai_subset as _xs
+    _xs.register_validation_ids(getattr(ctx, "validation_df", None))
     for k, v in overrides.items():
         globals()[k] = v
 
@@ -272,8 +277,7 @@ def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
     rows = []
     for _, r in master.iterrows():
         # run_dir in the CSV is an absolute path from another machine/session; re-root it.
-        tail = str(r.run_dir).split("artifacts/enhanced/")[-1]
-        run_dir = os.path.join(art_path, tail)
+        run_dir = _paths.run_dir_abs(r.run_dir, art_path)
 
         canonical = os.path.join(run_dir, "xai", "faithfulness", "faithfulness_curves.npz")
         aligned = os.path.join(aligned_root, str(r.run_id), "faithfulness_aligned_attr_curves.npz")
@@ -404,7 +408,7 @@ def stratified_table(art_path, methods=None, q_maxes=DEFAULT_Q_MAX,
     return pd.DataFrame(out)
 
 
-def pool_by_family(df):
+def pool_by_family(df, verbose=True):
     """Pool per-run cells within a strategy family (5 runs x 128 samples).
 
     Sample-weighted, so a run contributing 4 samples to a thin cell does not count as
@@ -412,8 +416,14 @@ def pool_by_family(df):
     below MIN_CELL_N have a withheld `gain` but a perfectly usable sample mean -- the
     floor applies to what we *report*, and pooling is exactly how a thin cell becomes
     reportable.
+
+    Unimodal endpoints are dropped first: this is a family aggregate, and at an endpoint a
+    branch is off by construction (`xs.ABLATION_SETTINGS`).  Keeping them moved
+    `fixed_scaling` signed tabular deletion from 1.052 to 1.195, over 45 runs instead of 35.
     """
-    g = df.dropna(subset=["gain_all_n"]).copy()
+    from . import xai_subset as _xs
+    g = _xs.drop_ablations(df, "faithfulness strata", verbose)
+    g = g.dropna(subset=["gain_all_n"]).copy()
     g["_w"] = g["n"] * g["gain_all_n"]
 
     # `mode` MUST be a grouping key: a signed run contributes four rankings per cell, and
@@ -966,6 +976,10 @@ def explanation_faithfulness(model, run_dir, best_epoch, n_samples=None, budgets
         _eff_subset = subset_idx if subset_idx is not None else FAITH_SUBSET_IDX
         results["subset_fingerprint"] = ACTIVE_SUBSET_FINGERPRINT
         results["n_subset"] = int(len(_eff_subset)) if _eff_subset is not None else None
+        if _eff_subset is not None:
+            from . import xai_subset as _xs
+            npz["val_index"] = np.asarray(_eff_subset, int)
+            npz.update(_xs.stamp_row_ids(_eff_subset))
         np.savez_compressed(os.path.join(fdir, f"{out_name}_curves.npz"), **npz)
         with open(os.path.join(fdir, f"{out_name}.json"), "w") as f:
             json.dump({**results, "curves": curves_json, "q_grid": q_grid.tolist()}, f, indent=2)

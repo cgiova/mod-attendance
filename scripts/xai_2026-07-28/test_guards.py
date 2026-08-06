@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.join(BASE, "src"))
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
-ART = os.path.join(BASE, "artifacts", "enhanced")
+from isic24 import paths as _paths0                           # noqa: E402
+ART = str(_paths0.art_path())
 RESULTS = []
 
 
@@ -603,6 +604,26 @@ check("D. il groupby secco (codice di prima) NON se ne accorge",
 check("E. una tabella senza le colonne di identita' passa intatta",
       len(xs.drop_ablations(pd.DataFrame({"x": [1, 2]}), "test", verbose=False)) == 2)
 
+# `pool_by_family` era l'ultimo punto che aggregava per famiglia SENZA il filtro: le tabelle
+# per strato uscivano con 45 run di `fixed_scaling` invece di 35 (su ISIC: 1.195 invece di 1.052).
+from isic24 import xai_faithfulness as _xf                    # noqa: E402
+_st = pd.DataFrame({
+    "impl_name": ["fixed_scaling"] * 3,
+    "setting_tag": ["a0p000", "a1p000", "a0p500"],
+    "run_id": ["r0", "r1", "r2"],
+    "source": ["aligned_signed"] * 3, "mode": ["target"] * 3, "method": ["tabular"] * 3,
+    "direction": ["del"] * 3, "q_max": [0.2] * 3, "q_width": [0.2] * 3, "stratum": ["all"] * 3,
+    "n": [100, 100, 100], "gain_all_n": [1.0, 1.0, 0.4],
+})
+_pooled_f = _xf.pool_by_family(_st, verbose=False)
+check("F. il pooling per famiglia esclude gli endpoint",
+      len(_pooled_f) == 1 and _pooled_f.n_runs.iloc[0] == 1
+      and abs(_pooled_f.gain.iloc[0] - 0.4) < 1e-9,
+      f"n_runs={_pooled_f.n_runs.iloc[0]}, gain {_pooled_f.gain.iloc[0]:.3f}")
+_old = (_st.n * _st.gain_all_n).sum() / _st.n.sum()
+check("G. la media pesata secca (codice di prima) NON se ne accorge",
+      abs(_old - 0.8) < 1e-9, "0.800 contro 0.400 filtrando")
+
 # ======================================================================= 17 ===
 section("17. indici — una sola funzione, e l'identita' per isic_id")
 # `explained_indices` (posizione DENTRO il campione) e `val_index` (posizione in
@@ -622,13 +643,79 @@ with np.load(_p_idx) as _z:
           _i2 is None and _src2 == "unknown")
 
 _vdf = pd.DataFrame({"isic_id": ["A", "B", "C", "B"]})     # validation ha righe duplicate
-check("D. isic_ids_for e index_for_isic_ids sono inverse sulle righe uniche",
-      xs.index_for_isic_ids(["C", "A"], _vdf).tolist() == [2, 0]
-      and xs.isic_ids_for([2, 0], _vdf).tolist() == ["C", "A"])
-_okd, _msgd = raises(lambda: xs.index_for_isic_ids(["B"], _vdf), KeyError)
-check("E. un isic_id duplicato SOLLEVA invece di prendere la prima occorrenza", _okd, _msgd)
-_oke, _msge = raises(lambda: xs.index_for_isic_ids(["Z"], _vdf), KeyError)
-check("F. un isic_id assente solleva", _oke, _msge)
+check("D. index_for_row_ids risolve le righe uniche",
+      xs.index_for_row_ids(["C", "A"], _vdf).tolist() == [2, 0])
+_okd, _msgd = raises(lambda: xs.index_for_row_ids(["B"], _vdf), KeyError)
+check("E. un id duplicato SOLLEVA invece di prendere la prima occorrenza", _okd, _msgd)
+_oke, _msge = raises(lambda: xs.index_for_row_ids(["Z"], _vdf), KeyError)
+check("F. un id assente solleva", _oke, _msge)
+
+# ======================================================================= 18 ===
+section("18. identita' di riga — una pipeline, un dataset qualunque")
+# Il codice non deve sapere come si chiama la colonna d'identita': `isic_id` qui,
+# `image_id` su BRSET. Quello che finisce DENTRO gli artefatti e' `row_id`, sempre.
+_ID_COL0, _REG0 = xs.ID_COL, xs.VALIDATION_ROW_IDS
+_brset = pd.DataFrame({"image_id": ["img1", "img2", "img3", "img4"]})
+try:
+    xs.ID_COL = "image_id"
+    check("A. la colonna d'identita' si dichiara, non si indovina",
+          xs.row_ids(_brset).tolist() == ["img1", "img2", "img3", "img4"])
+    _okg, _msgg = raises(lambda: xs.row_ids(_vdf), KeyError)
+    check("B. colonna assente -> solleva dicendo cosa dichiarare", _okg, _msgg)
+    xs.register_validation_ids(_brset)
+    check("C. la chiave scritta nell'artefatto e' neutra, non il nome della colonna",
+          list(xs.stamp_row_ids([2, 0])) == ["row_id"]
+          and xs.stamp_row_ids([2, 0])["row_id"].tolist() == ["img3", "img1"])
+    _okh, _msgh = raises(lambda: xs.stamp_row_ids([99]))
+    check("D. un indice fuori dal validation registrato SOLLEVA", _okh, _msgh)
+    check("E. senza validation registrato non si inventa un'identita'",
+          xs.register_validation_ids(None) is None and xs.stamp_row_ids([0]) == {})
+
+    # Il caso che le POSIZIONI non sanno vedere: stesso campione posizionale, fold
+    # ricostruito in un altro ordine. E' il difetto per cui l'identita' esiste.
+    _run_id = os.path.join(TMP, "id_run")
+    _d = os.path.join(_run_id, "xai", "shap_tab", "epoch_003")
+    os.makedirs(_d, exist_ok=True)
+    np.savez(os.path.join(_d, "shap_arrays_epoch_003.npz"),
+             shap_values=rng.normal(size=(2, len(NAMES))), explained_indices=np.arange(2),
+             val_index=np.array([0, 2]), row_id=np.asarray(["img1", "img3"]))
+    xs.register_validation_ids(_brset)
+    check("F. stesse posizioni, stesse lesioni -> True",
+          xs.sample_matches(_run_id, "shap_tab", [0, 2]) is True)
+    xs.register_validation_ids(pd.DataFrame({"image_id": ["img4", "img2", "img1", "img3"]}))
+    check("G. stesse posizioni, fold RIORDINATO -> False (le posizioni direbbero True)",
+          xs.sample_matches(_run_id, "shap_tab", [0, 2]) is False)
+    xs.register_validation_ids(None)
+    check("H. codice vecchio (solo posizioni) sul caso G: resta muto",
+          xs.sample_matches(_run_id, "shap_tab", [0, 2]) is True)
+
+    # Gli artefatti gia' su disco portano `isic_id`: si leggono ancora, non si riscrivono.
+    check("I. l'identita' vecchia (`isic_id`) resta leggibile",
+          xs.read_explained_ids(pd.DataFrame({"isic_id": ["A", "B"]})).tolist() == ["A", "B"])
+finally:
+    xs.ID_COL, xs.VALIDATION_ROW_IDS = _ID_COL0, _REG0
+
+# ======================================================================= 19 ===
+section("19. percorsi — nessun nome di dataset dentro il codice")
+from isic24 import paths as _pth                               # noqa: E402
+
+_hist = "/home/claudio/isic24-dum/artifacts/enhanced/runs/vanilla/20260604-210304/seed_47/e20"
+check("A. un run_dir di un'altra macchina si ri-radica su questo albero",
+      _pth.run_dir_abs(_hist, "/local/art")
+      == "/local/art/runs/vanilla/20260604-210304/seed_47/e20")
+check("B. e ci si ri-radica anche dopo che la cartella e' stata spostata",
+      _pth.run_dir_abs("/x/artifacts/isic24/enhanced/runs/vanilla/r1", "/local/art")
+      == "/local/art/runs/vanilla/r1")
+_oki, _msgi = raises(lambda: _pth.run_dir_abs("/x/y/z", "/local/art"), ValueError)
+check("C. un percorso senza 'runs/' SOLLEVA invece di tornare quello della macchina "
+      "d'origine", _oki, _msgi)
+check("D. il codice vecchio sul caso C: torna un path inesistente che sembra giusto",
+      "/x/y/z".split("artifacts/enhanced/")[-1] == "/x/y/z")
+check("E. la radice di un dataset ha due segmenti",
+      _pth.dataset_root("/r", "brset", "enhanced").as_posix().endswith("/r/brset/enhanced"))
+check("F. un run_dir gia' dentro l'albero locale passa intatto",
+      _pth.run_dir_abs("/local/art/runs/vanilla/r1", "/local/art")
+      == "/local/art/runs/vanilla/r1")
 
 # ======================================================================= 16 ===
 section("16. griglia dell'immagine — un solo percorso, e nessuna precisione nominale")

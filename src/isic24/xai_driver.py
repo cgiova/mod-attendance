@@ -19,6 +19,7 @@ import os
 
 import keras
 
+from . import paths as _paths
 from . import xai_faithfulness as xf
 from .xai_engines import (
     LoreCallback,
@@ -566,8 +567,7 @@ def run_posthoc_xai_batch(art_path, engines=ALL_ENGINES, only_impl=None, max_run
 
     results = {}
     for i, r in master.reset_index(drop=True).iterrows():
-        tail = str(r.run_dir).split("artifacts/enhanced/")[-1]
-        run_dir = os.path.join(art_path, tail)
+        run_dir = _paths.run_dir_abs(r.run_dir, art_path)
         try:
             results[r.run_id] = run_posthoc_xai(
                 run_dir, engines=engines, best_epoch=int(r.best_epoch),

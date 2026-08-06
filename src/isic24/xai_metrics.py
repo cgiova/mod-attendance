@@ -46,6 +46,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from . import paths as _paths
+
 # Sotto questa massa |SHAP| totale il ramo tabellare e' spento e la "compattezza" e' un
 # artefatto della divisione per zero. `a0p000` misura 0.0 esatto, il vicino 15.5: qualunque
 # soglia in mezzo separa: 1.0 e' prudente e non arbitraria al margine.
@@ -449,8 +451,7 @@ def stability_table(master, art_path, encoded_feature_names, k=TOP_K):
     g = raw_groups(encoded_feature_names)
     m = master.copy()
     m["param"] = [setting_value(i, t) for i, t in zip(m.impl_name, m.setting_tag)]
-    m["run_dir_abs"] = [os.path.join(art_path, str(d).split("artifacts/enhanced/")[-1])
-                        for d in m.run_dir]
+    m["run_dir_abs"] = [_paths.run_dir_abs(d, art_path) for d in m.run_dir]
 
     cache, ref_idx = {}, None
     def topk(run_dir):
@@ -520,7 +521,7 @@ def collect(master, art_path, encoded_feature_names=None, k=TOP_K, d_raw=None,
         d_raw = len(raw_groups(encoded_feature_names))
     rows = []
     for _, r in master.iterrows():
-        rd = os.path.join(art_path, str(r.run_dir).split("artifacts/enhanced/")[-1])
+        rd = _paths.run_dir_abs(r.run_dir, art_path)
         rec = dict(impl_name=r.impl_name, setting_tag=r.setting_tag, seed=r.seed,
                    run_id=r.run_id, param=setting_value(r.impl_name, r.setting_tag))
         for f in (shap_shape_metrics(rd, encoded_feature_names, k),

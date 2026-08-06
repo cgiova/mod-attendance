@@ -142,8 +142,12 @@ def assert_canonical_eval(ns, faith_n=CANONICAL_FAITH_N, require_snapshot=True,
                                      "oppure chiama con require_snapshot=False.")
         print(msg)
     elif vdf is not None:
+        from . import xai_subset as xs
         snap = json.load(open(snap_path))
-        match = sorted(vdf.isic_id.tolist()) == snap["isic_ids_sorted"]
+        # `isic_ids_sorted`: chiave degli snapshot scritti prima che l'identita' avesse un
+        # nome indipendente dal dataset. Si legge ancora, non si scrive piu'.
+        want = snap.get("row_ids_sorted", snap.get("isic_ids_sorted"))
+        match = sorted(str(v) for v in xs.row_ids(vdf)) == list(want)
         src = snap.get("source", "?")
         desc["snapshot_source"], desc["snapshot_match"] = src, bool(match)
         if not match:

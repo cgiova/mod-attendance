@@ -20,7 +20,7 @@ stratificato n=256 ci sono **222 lesioni uniche** su 256 righe, e fra gli 85 pos
 lesioni uniche** (molteplicita' fino a 3). La XAI spiega la stessa lesione piu' volte: i campioni
 non sono indipendenti e **ogni intervallo di confidenza per run e' ottimistico**.
 
-Il rimedio e' deduplicare su `isic_id`, non stratificare: `unique_lesion_subset` (+ `adopt`),
+Il rimedio e' deduplicare sull'identita' di riga, non stratificare: `unique_lesion_subset` (+ `adopt`),
 usato in produzione dal 31/07 con n=144 lesioni distinte, balance='equal'.
 
 ⚠️ E IL PREFISSO DI *QUESTO* CAMPIONE E' SBILANCIATO SUL SERIO (misurato 2026-08-01)
@@ -56,6 +56,8 @@ import json
 import os
 
 import numpy as np
+
+from . import paths as _paths
 
 # Gli artefatti PER RUN vivono dentro la run (vedi `out_dir_for` piu' sotto). Qui resta
 # solo la destinazione di cio' che e' CROSS-RUN e quindi non appartiene a nessuna: tabelle
@@ -102,8 +104,8 @@ def stratified_subset(labels, n, seed=0):
     return idx
 
 
-def unique_lesion_subset(isic_ids, labels, n=None, seed=0, balance="pool"):
-    """Indici POSIZIONALI su **lesioni distinte**: una riga per `isic_id`, mai due.
+def unique_lesion_subset(ids, labels, n=None, seed=0, balance="pool"):
+    """Indici POSIZIONALI su **lesioni distinte**: una riga per identita', mai due.
 
     E' il rimedio al problema vero: `pos_sample=5.0` con `replace=True` fa comparire la stessa
     lesione ~5 volte, e le copie sono repliche ESATTE (stessa immagine, stesse feature, stessa
@@ -120,10 +122,10 @@ def unique_lesion_subset(isic_ids, labels, n=None, seed=0, balance="pool"):
     Solleva se ``n`` non e' ottenibile, dicendo qual e' il massimo: il modo peggiore di
     fallire qui sarebbe restituire in silenzio meno positivi di quelli chiesti.
     """
-    ids = np.asarray(isic_ids)
+    ids = np.asarray(ids)
     y = np.asarray(labels).reshape(-1)
     if len(ids) != len(y):
-        raise ValueError(f"isic_ids ({len(ids)}) e labels ({len(y)}) di lunghezza diversa")
+        raise ValueError(f"ids ({len(ids)}) e labels ({len(y)}) di lunghezza diversa")
 
     # Un rappresentante per lesione: la PRIMA occorrenza. Deterministico e indipendente dal
     # seed, cosi' due campioni con seed diversi pescano fra le stesse lesioni.
@@ -182,13 +184,13 @@ def unique_lesion_subset(isic_ids, labels, n=None, seed=0, balance="pool"):
                  "n_unique_available": avail}
 
 
-def subset_fingerprint(isic_ids, idx, seed, n, kind="stratified"):
+def subset_fingerprint(ids_all, idx, seed, n, kind="stratified"):
     """Identita' del campione. E' questa che impedisce di mescolare ordinamenti diversi.
 
-    Include gli ISIC id NELL'ORDINE del campione, non solo il conteggio: due campioni della
-    stessa dimensione sullo stesso validation set devono avere impronte diverse.
+    Include gli id di riga NELL'ORDINE del campione, non solo il conteggio: due campioni
+    della stessa dimensione sullo stesso validation set devono avere impronte diverse.
     """
-    ids = [str(isic_ids[i]) for i in np.asarray(idx, int)]
+    ids = [str(ids_all[i]) for i in np.asarray(idx, int)]
     h = hashlib.sha256(("|".join(ids) + f"|{kind}|{seed}|{n}").encode()).hexdigest()[:16]
     return f"{kind}-s{seed}-n{n}-{h}"
 
@@ -198,14 +200,14 @@ def subset_fingerprint(isic_ids, idx, seed, n, kind="stratified"):
 PREFIX_FINGERPRINT = "prefix"
 
 
-def save_snapshot(path, isic_ids, idx, seed, n, kind="stratified", extra=None):
+def save_snapshot(path, ids_all, idx, seed, n, kind="stratified", extra=None):
     """Scrive il campione su disco. Gli ID, non solo gli indici: gli indici da soli non
     sopravvivono a un ricalcolo del fold."""
-    fp = subset_fingerprint(isic_ids, idx, seed, n, kind=kind)
+    fp = subset_fingerprint(ids_all, idx, seed, n, kind=kind)
     snap = {
         "fingerprint": fp, "kind": kind, "seed": int(seed), "n": int(n),
         "positional_idx": [int(i) for i in idx],
-        "isic_ids": [str(isic_ids[i]) for i in np.asarray(idx, int)],
+        "row_ids": [str(ids_all[i]) for i in np.asarray(idx, int)],
         **(extra or {}),
     }
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -219,20 +221,22 @@ def load_snapshot(path):
         return json.load(f)
 
 
-def verify_snapshot(snap, isic_ids):
+def verify_snapshot(snap, ids_all):
     """Il campione salvato descrive ANCORA questo validation set?
 
     Se il fold viene ricostruito diversamente, gli indici posizionali puntano ad altre
     lesioni: qui si solleva invece di produrre numeri plausibili e sbagliati.
     """
     idx = np.asarray(snap["positional_idx"], int)
-    if int(np.max(idx)) >= len(isic_ids):
+    if int(np.max(idx)) >= len(ids_all):
         raise RuntimeError(
-            f"snapshot fuori range: indice max {int(np.max(idx))} su {len(isic_ids)} righe "
+            f"snapshot fuori range: indice max {int(np.max(idx))} su {len(ids_all)} righe "
             f"di validation. Il fold e' cambiato: rigenera il campione.")
-    have = [str(isic_ids[i]) for i in idx]
-    if have != list(snap["isic_ids"]):
-        n_bad = sum(a != b for a, b in zip(have, snap["isic_ids"]))
+    have = [str(ids_all[i]) for i in idx]
+    # `isic_ids`: chiave degli snapshot scritti prima che l'identita' avesse un nome neutro.
+    want = list(snap.get("row_ids", snap.get("isic_ids", [])))
+    if have != want:
+        n_bad = sum(a != b for a, b in zip(have, want))
         raise RuntimeError(
             f"snapshot NON corrisponde al validation set corrente: {n_bad}/{len(idx)} id "
             f"diversi alle stesse posizioni. Gli artefatti gia' prodotti con l'impronta "
@@ -270,21 +274,9 @@ SUBSET_TASKS = {"shap_tab": ("faith", "shap"), "lore_sa": ("lore",),
                 "gradcam_img": ("gradcam",)}
 
 
-def run_dir_abs(run_dir, art_path):
-    """Ri-radica un `run_dir` letto da un CSV sull'albero degli artefatti LOCALE.
-
-    I CSV di riepilogo (`master_results_rows.csv`, i `*_combined.csv` per famiglia) portano
-    `run_dir` come percorso ASSOLUTO della macchina che ha fatto il training —
-    `/home/claudio/isic24-dum/...` — che qui non esiste. Usato grezzo da' un
-    `ValueError: File not found` su un percorso che *sembra* giusto, ed e' un errore che
-    compare solo su una macchina diversa da quella di origine: cioe' sempre, tranne dove e'
-    stato scritto.
-
-    Questa e' la SESTA copia di `split("artifacts/enhanced/")[-1]` — le altre cinque stanno
-    in `xai_faithfulness`, `xai_driver`, `xai_metrics` (x2) e piu' sotto in questo modulo.
-    E' la voce «doppioni di mappatura» della lista di pulizia: le altre vanno tirate qui.
-    """
-    return os.path.join(str(art_path), str(run_dir).split("artifacts/enhanced/")[-1])
+# La ri-radicazione dei `run_dir` sta in `paths`, che e' il modulo dei percorsi: qui resta
+# il nome con cui il resto del codice la chiama gia'. Era la stessa riga copiata sei volte.
+run_dir_abs = _paths.run_dir_abs
 
 
 def out_dir_for(run_dir, kind):
@@ -450,7 +442,7 @@ def adopt(validation_df, n=None, balance="pool", seed=0, snapshot_dir=None,
             print("[campione] DISARMATO — si torna alle prime N righe (comportamento storico).")
         return None, {"balance": None}
 
-    ids = validation_df.isic_id.values
+    ids = register_validation_ids(validation_df)     # da qui gli artefatti prendono l'identita'
     y = validation_df.target.values
     idx, info = unique_lesion_subset(ids, y, n=n, seed=seed, balance=balance)
 
@@ -633,8 +625,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         ns = sorted(set(int(v) for v in df["n"])) if len(df) else []
         return f"_n{ns[0]}" if len(ns) == 1 else ""
     # il master porta i path della macchina su cui e' stato scritto: si riancora su art_path
-    rd = {r.run_id: os.path.join(art_path, str(r.run_dir).split("artifacts/enhanced/")[-1])
-          for _, r in master.iterrows()}
+    rd = {r.run_id: run_dir_abs(r.run_dir, art_path) for _, r in master.iterrows()}
     written, out = [], {}
 
     if "shap_tab" in kinds:
@@ -766,6 +757,15 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
 # della stessa taglia, e incrociarli non solleva: ha gia' prodotto tre difetti distinti.
 # Chi vuole gli indici li chiede QUI e riceve anche lo spazio in cui vivono.
 
+def _artifact_column(npz_or_df, key, dtype):
+    """Una colonna da un npz o da un CSV gia' letto, senza sapere quale dei due sia."""
+    keys = (npz_or_df.files if hasattr(npz_or_df, "files")
+            else list(getattr(npz_or_df, "columns", [])))
+    if key not in keys:
+        return None
+    return np.asarray(npz_or_df[key], dtype).ravel()
+
+
 def read_explained_index(npz_or_df, allow_prefix=True):
     """``(indici in validation_df, provenienza)`` da un npz o da un CSV per campione.
 
@@ -775,30 +775,88 @@ def read_explained_index(npz_or_df, allow_prefix=True):
     Restituisce ``(None, "unknown")`` se l'artefatto non dice quali righe ha spiegato —
     "non lo so" non e' "non corrisponde", e chi chiama decide.
     """
-    keys = (npz_or_df.files if hasattr(npz_or_df, "files")
-            else list(getattr(npz_or_df, "columns", [])))
-    get = ((lambda k: np.asarray(npz_or_df[k], int).ravel()) if hasattr(npz_or_df, "files")
-           else (lambda k: npz_or_df[k].to_numpy().astype(int).ravel()))
-    if "val_index" in keys:
-        return get("val_index"), "val_index"
-    if allow_prefix and "explained_indices" in keys:
-        return get("explained_indices"), "prefix"
+    vi = _artifact_column(npz_or_df, "val_index", int)
+    if vi is not None:
+        return vi, "val_index"
+    if allow_prefix:
+        ei = _artifact_column(npz_or_df, "explained_indices", int)
+        if ei is not None:
+            return ei, "prefix"
     return None, "unknown"
 
 
-def isic_ids_for(idx, validation_df):
-    """Gli `isic_id` alle posizioni date: l'identita' che sopravvive a un cambio di ordine."""
-    return validation_df["isic_id"].to_numpy()[np.asarray(idx, int)]
+def read_explained_ids(npz_or_df):
+    """Gli id di riga spiegati da un artefatto, o ``None`` se non li registra.
 
-
-def index_for_isic_ids(ids, validation_df):
-    """Posizioni in `validation_df` di questi `isic_id`, con i due modi di sbagliare chiusi.
-
-    Il validation e' ricampionato: 291 righe sono duplicati, quindi `isic_id` -> posizione
-    non e' iniettivo. Un id duplicato o assente solleva invece di risolversi in silenzio
-    nella prima occorrenza.
+    E' l'identita' che sopravvive a una ricostruzione del fold: gli indici posizionali no.
+    ``isic_id`` e' la chiave degli artefatti scritti prima che l'identita' avesse un nome
+    indipendente dal dataset; si legge ancora, non si scrive piu'.
     """
-    col = validation_df["isic_id"].to_numpy()
+    ids = _artifact_column(npz_or_df, ROW_ID_KEY, str)
+    return ids if ids is not None else _artifact_column(npz_or_df, "isic_id", str)
+
+
+# --------------------------------------------------------------------------------------
+# L'identita' di una riga — una pipeline, dataset qualunque
+# --------------------------------------------------------------------------------------
+# `ID_COL` e' la colonna che identifica una riga nel dataframe di validation, e cambia con
+# il dataset: `isic_id` su ISIC-2024, `image_id` su BRSET. Si dichiara UNA volta per
+# sessione, accanto agli altri parametri; da li' in poi nessuna funzione la nomina.
+#
+# `ROW_ID_KEY` invece NON cambia mai: e' il nome con cui l'identita' viene scritta dentro
+# gli artefatti, cosi' un npz e' leggibile senza sapere da quale dataset viene.
+ID_COL = "isic_id"
+ROW_ID_KEY = "row_id"
+
+# Il validation ATTIVO in questa sessione: la sola sorgente di identita' in scrittura.
+# Lo riempiono `adopt` e `xai_faithfulness.configure`, cioe' i due punti in cui una
+# sessione dichiara su quale eval set sta lavorando; l'ultimo dichiarato vince.
+VALIDATION_ROW_IDS = None
+
+
+def row_ids(df):
+    """La colonna di identita' di un dataframe, qualunque dataset sia."""
+    if ID_COL not in getattr(df, "columns", []):
+        raise KeyError(
+            f"colonna di identita' {ID_COL!r} assente: le colonne sono {list(df.columns)[:8]}. "
+            f"Dichiara xs.ID_COL accanto agli altri parametri della sessione.")
+    return df[ID_COL].to_numpy()
+
+
+def register_validation_ids(validation_df):
+    """Dichiara quale validation e' attivo. Da qui gli artefatti prendono l'identita'."""
+    global VALIDATION_ROW_IDS
+    VALIDATION_ROW_IDS = (None if validation_df is None
+                          else np.asarray(row_ids(validation_df), str))
+    return VALIDATION_ROW_IDS
+
+
+def stamp_row_ids(val_index):
+    """``{ROW_ID_KEY: ...}`` da scrivere in un artefatto, ``{}`` se nessun validation e' noto.
+
+    Unico punto che traduce posizioni -> identita' in scrittura. Un indice fuori range
+    solleva: significa che il campione e il validation registrato sono di due fold diversi,
+    ed e' proprio il caso in cui gli id scritti sarebbero plausibili e sbagliati.
+    """
+    if VALIDATION_ROW_IDS is None or val_index is None:
+        return {}
+    idx = np.asarray(val_index, int)
+    if idx.size and int(idx.max()) >= len(VALIDATION_ROW_IDS):
+        raise RuntimeError(
+            f"stamp_row_ids: indice {int(idx.max())} su un validation di "
+            f"{len(VALIDATION_ROW_IDS)} righe. Il campione non appartiene al validation "
+            f"registrato: rigeneralo, oppure ri-dichiara il contesto.")
+    return {ROW_ID_KEY: VALIDATION_ROW_IDS[idx]}
+
+
+def index_for_row_ids(ids, validation_df):
+    """Posizioni in `validation_df` di questi id, con i due modi di sbagliare chiusi.
+
+    Il validation e' ricampionato: 291 righe sono duplicati, quindi id -> posizione non e'
+    iniettivo. Un id duplicato o assente solleva invece di risolversi in silenzio nella
+    prima occorrenza.
+    """
+    col = row_ids(validation_df)
     pos = {}
     dup = set()
     for i, v in enumerate(col):
@@ -807,13 +865,48 @@ def index_for_isic_ids(ids, validation_df):
     missing = [v for v in want if v not in pos]
     ambiguous = [v for v in want if v in dup]
     if missing or ambiguous:
-        raise KeyError(f"isic_id assenti dal validation: {missing[:5]} | "
+        raise KeyError(f"id assenti dal validation: {missing[:5]} | "
                        f"duplicati (posizione non definita): {ambiguous[:5]}")
     return np.asarray([pos[v] for v in want], int)
 
 
+# Dove ciascun motore lascia l'artefatto che dichiara le righe spiegate, dentro
+# `out_dir_for(run_dir, kind)`. Si legge sempre il piu' recente.
+SUBSET_ARTIFACT_GLOB = {
+    "lore_sa": os.path.join("epoch*", "lore_sa_persample_*.csv"),
+    "shap_tab": os.path.join("epoch_*", "shap_arrays_epoch_*.npz"),
+    "gradcam_img": "gradcam_arrays*_epoch_*.npz",
+}
+
+
+def read_sample_identity(run_dir, kind):
+    """``(indici, id di riga)`` dell'artefatto piu' recente di `kind`; ``None`` dove manca.
+
+    `allow_prefix=False`: `explained_indices` vive in un altro spazio (posizione DENTRO il
+    campione), e confrontarlo con indici di validation dava sempre False su artefatti sani.
+    """
+    import glob as _glob
+    pat = SUBSET_ARTIFACT_GLOB.get(kind)
+    if pat is None:
+        return None, None
+    hits = sorted(_glob.glob(os.path.join(out_dir_for(run_dir, kind), pat)))
+    if not hits:
+        return None, None
+    if hits[-1].endswith(".csv"):
+        import pandas as pd
+        art = pd.read_csv(hits[-1])
+        return read_explained_index(art, allow_prefix=False)[0], read_explained_ids(art)
+    with np.load(hits[-1]) as z:
+        return read_explained_index(z, allow_prefix=False)[0], read_explained_ids(z)
+
+
 def sample_matches(run_dir, kind, expected_idx):
     """Gli artefatti di `kind` sono stati calcolati SU QUESTI campioni?  (True/False/None)
+
+    Il confronto passa per gli id di riga quando l'artefatto li porta e il validation attivo
+    e' registrato: due fold ricostruiti in ordine diverso hanno le STESSE posizioni e id
+    diversi, quindi solo gli id sanno distinguerli.  Senza id da una delle due parti si
+    ricade sulle posizioni, che e' quanto si puo' dire degli artefatti piu' vecchi.
 
     L'impronta nella stampigliatura identifica il campione-PADRE (le 144 lesioni), non il
     sottoinsieme che un motore ha davvero spiegato.  LORE ne spiega 48: il 31/07 erano i
@@ -825,37 +918,14 @@ def sample_matches(run_dir, kind, expected_idx):
     prodotti prima che `val_index` esistesse): "non lo so" e' un'informazione diversa da
     "non corrisponde", e chi chiama decide se rifare.
     """
-    import glob as _glob
-    exp = np.asarray(expected_idx, int)
-    d = out_dir_for(run_dir, kind)
-    if kind == "lore_sa":
-        hits = sorted(_glob.glob(os.path.join(d, "epoch*", "lore_sa_persample_*.csv")))
-        if not hits:
-            return None
-        import pandas as pd
-        got, src = read_explained_index(pd.read_csv(hits[-1]), allow_prefix=False)
-        if got is None:
-            return None
-    elif kind == "shap_tab":
-        hits = sorted(_glob.glob(os.path.join(d, "epoch_*", "shap_arrays_epoch_*.npz")))
-        if not hits:
-            return None
-        with np.load(hits[-1]) as z:
-            # allow_prefix=False: `explained_indices` vive in un altro spazio, e
-            # confrontarlo con `expected_idx` dava sempre False su artefatti sani.
-            got, src = read_explained_index(z, allow_prefix=False)
-            if got is None:
-                return None
-    elif kind == "gradcam_img":
-        hits = sorted(_glob.glob(os.path.join(d, "gradcam_arrays*_epoch_*.npz")))
-        if not hits:
-            return None
-        with np.load(hits[-1]) as z:
-            got, src = read_explained_index(z, allow_prefix=False)
-            if got is None:
-                return None
-    else:
+    got, got_ids = read_sample_identity(run_dir, kind)
+    exp_ids = stamp_row_ids(expected_idx).get(ROW_ID_KEY)
+    if got_ids is not None and exp_ids is not None:
+        return len(got_ids) == len(exp_ids) and bool(
+            np.array_equal(np.sort(got_ids), np.sort(np.asarray(exp_ids, str))))
+    if got is None:
         return None
+    exp = np.asarray(expected_idx, int)
     return len(got) == len(exp) and bool(np.array_equal(np.sort(got), np.sort(exp)))
 
 
