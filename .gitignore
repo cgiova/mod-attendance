@@ -26,7 +26,7 @@ data/
 *.csv
 *.zip
 
-# artifacts — ci vivono anche i report: MODALITY_ATTENDANCE.md NON viaggia nei commit
+# artifacts — ci vivono anche i report (`<DATASET>_STATUS.md`, `<DATASET>_REPORT.md`): NON viaggiano nei commit
 models/
 runs/
 outputs/
