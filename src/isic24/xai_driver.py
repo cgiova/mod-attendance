@@ -43,20 +43,20 @@ SHAP_KWARGS = dict(
 )
 GRADCAM_KWARGS = dict(use_guided_grads=True, mode="image_only")
 GRADCAM_CB_KWARGS = dict(class_index=0)
-# I DUE MODI di Grad-CAM, girati nello stesso caricamento (2026-08-01).
-#   `image_only`  azzera le feature tabellari -> "dove guarderebbe SENZA il tabellare"
-#   `context`     usa le feature vere         -> "dove guarda davvero"
-# Fino a oggi girava solo `image_only`: con il tabellare spento, cioe' con la fusione
-# disattivata. Per uno studio sull'attendance e' proprio la configurazione che non risponde
-# alla domanda ("il peso della modalita' sposta l'attenzione visiva?"), e la differenza fra
-# i due modi (`cam_iou_modes`) e' essa stessa una misura di quanto il tabellare la sposta.
-# None = un modo solo, quello di GRADCAM_KWARGS (comportamento storico).
+# The TWO Grad-CAM modes, run within the same model load (2026-08-01).
+#   `image_only`  zeroes the tabular features -> "where it would look WITHOUT the table"
+#   `context`     uses the real features      -> "where it actually looks"
+# Until today only `image_only` ran: with the tabular branch off, i.e. with the fusion
+# disabled. For an attendance study that is precisely the configuration that does not answer
+# the question ("does the modality weight move visual attention?"), and the difference
+# between the two modes (`cam_iou_modes`) is itself a measure of how much the table moves it.
+# None = a single mode, the one in GRADCAM_KWARGS (historical behaviour).
 GRADCAM_MODES = ("image_only", "context")
-# Immagini per passo di gradiente. A 144 tutte insieme la GPU esaurisce la memoria: i
-# guided gradients tengono le attivazioni di TUTTA la rete per ogni immagine (misurato il
-# 01/08: ~22 GiB su un tensore (144, 8, 8, 1248), OOM su una GPU da 24 GB). Grad-CAM e' per
-# campione, quindi spezzare il batch da' lo stesso risultato a memoria costante. Alzarlo se
-# la GPU e' libera, abbassarlo se va ancora in OOM.
+# Images per gradient step. With all 144 at once the GPU runs out of memory: guided
+# gradients keep the activations of the WHOLE network for every image (measured 01/08:
+# ~22 GiB on a (144, 8, 8, 1248) tensor, OOM on a 24 GB GPU). Grad-CAM is per sample, so
+# splitting the batch gives the same result at constant memory. Raise it when the GPU is
+# free, lower it if it still OOMs.
 GRADCAM_BATCH = 16
 # max_explain_samples was 6 -- lore_fidelity was the mean over SIX instances (the same 6
 # for all 110 runs), which is why it saturated at ~0.97-0.98 and could not discriminate
@@ -69,60 +69,59 @@ LORE_KWARGS = dict(
 )
 
 # --------------------------------------------------------------------------------------
-# Quale motore LORE costruisce `make_xai_callbacks`.
+# Which LORE engine `make_xai_callbacks` builds.
 #
-#   "lore_sa" -> `LoreSACallback` + `LoreEngineSA` con LORE_SA_KWARGS.  **Default dal
-#                2026-07-29**, per decisione di Claudio: il vicinato `random` del legacy
-#                produce spiegazioni poco utili (1.7% di evidenza di classe opposta), quindi
-#                le spiegazioni vanno rigenerate con questo.
-#   "legacy"   -> `LoreCallback` + `LoreEngine` (xailib/lore_explainer).  Resta selezionabile
-#                perche' e' cio' che ha prodotto OGNI `lore_fidelity` in `master_results_*`:
-#                serve per riprodurre quei numeri, non per produrne di nuovi.
+#   "lore_sa" -> `LoreSACallback` + `LoreEngineSA` with LORE_SA_KWARGS. **Default since
+#                2026-07-29**: the legacy `random` neighbourhood produces explanations of
+#                little use (1.7% opposite-class evidence), so the explanations are
+#                regenerated with this one.
+#   "legacy"   -> `LoreCallback` + `LoreEngine` (xailib/lore_explainer). It stays selectable
+#                because it is what produced EVERY `lore_fidelity` in `master_results_*`: it
+#                serves to reproduce those numbers, not to produce new ones.
 #
-# CONSEGUENZA DA NON PERDERE.  I due motori NON spiegano la stessa funzione -- il legacy usa
-# un embedding immagine condiviso (`images.mean(axis=0)`), `LoreEngineSA` uno per campione --
-# e non usano la stessa metrica riportabile (vedi sotto).  Quindi la colonna `lore_fidelity`
-# dei 110 run resta un artefatto del percorso legacy: va tenuta come storia, non confrontata
-# riga per riga con i numeri nuovi.
+# THE CONSEQUENCE NOT TO LOSE. The two engines do NOT explain the same function -- legacy
+# uses a shared image embedding (`images.mean(axis=0)`), `LoreEngineSA` one per sample -- and
+# they do not use the same reportable metric (see below). So the `lore_fidelity` column of
+# the 110 runs stays an artifact of the legacy path: keep it as history, do not compare it
+# row by row with the new numbers.
 #
-# QUALE NUMERO RIPORTARE.  Non `fidelity`: e' `dt.score(Z, Yb)` in-sample, 1.0 per costruzione
-# su un albero non potato.  Vale sia per il legacy sia per lore_sa.  Riportare:
-#   `fid_cv_bacc`               fedelta' su fold tenuti fuori (l'unica che discrimina)
-#   `lore_sa_coverage`          frazione di campioni con vicinato NON degenere
-#   `neigh_unique_frac`, `neigh_pos_rate`   perche' senza questi la fedelta' non si legge
-# Deletion/insertion non entrano qui: sono la metrica di SHAP-tabellare e Grad-CAM, non di
-# LORE, che e' un surrogato a regole e si misura per accordo col black box.
+# WHICH NUMBER TO REPORT. Not `fidelity`: it is `dt.score(Z, Yb)` in-sample, 1.0 by
+# construction on an unpruned tree. That holds for legacy and lore_sa alike. Report:
+#   `fid_cv_bacc`               fidelity on held-out folds (the only discriminating one)
+#   `lore_sa_coverage`          fraction of samples with a NON-degenerate neighbourhood
+#   `neigh_unique_frac`, `neigh_pos_rate`   without which the fidelity cannot be read
+# Deletion/insertion do not belong here: they are the metric of tabular SHAP and Grad-CAM,
+# not of LORE, which is a rule surrogate measured by agreement with the black box.
 # --------------------------------------------------------------------------------------
 LORE_ENGINE = "lore_sa"
 
-# Configurazione scelta il 2026-07-29 misurando su vanilla seed_47 (n=2 campioni):
-# `mutpb=.5` + `init_mutpb=.3` da' 2.9x la diversita' di upstream, le regole piu' lunghe
-# (3.0) e 4x l'evidenza di classe opposta di `mutpb=.8`, a +19% di costo.  Dettagli e
-# tabella completa: `ISIC24_REPORT.md`, LORE generator configuration.
+# Configuration chosen 2026-07-29 by measuring on vanilla seed_47 (n=2 samples):
+# `mutpb=.5` + `init_mutpb=.3` gives 2.9x upstream's diversity, the longest rules (3.0) and
+# 4x the opposite-class evidence of `mutpb=.8`, at +19% cost. Details and the full table:
+# `ISIC24_REPORT.md`, LORE generator configuration.
 LORE_SA_KWARGS = dict(
     max_explain_samples=32, every_n_epochs=1, max_samples=256, max_batches=2, rng_seed=0,
     neigh_type="genetic", num_instances=1000, mutpb=0.5, init_mutpb=0.3, threshold=0.5,
 )
 
-# Dove gira LORE. Il suo ciclo caldo e' la TESTA densa (~1000 valutazioni per istanza) piu'
-# l'algoritmo genetico e l'albero, che sono CPU puro; la CNN gira una volta sola per run.
-# Quindi tiene la GPU occupata 23 min/run senza usarla quasi: su una macchina condivisa,
-# 42 ore di GPU ferma.
+# Where LORE runs. Its hot loop is the dense HEAD (~1000 evaluations per instance) plus the
+# genetic algorithm and the tree, which are pure CPU; the CNN runs once per run. So it keeps
+# the GPU busy 23 min/run while barely using it: on a shared machine, 42 hours of idle GPU.
 #
-# `"/CPU:0"` sposta LORE sulla CPU **lasciando la GPU visibile e libera** per gli altri
-# motori: `run_posthoc_xai` passa il device a `load_run_model`, quindi le variabili NASCONO
-# sulla CPU. E' l'unico punto in cui la scelta ha effetto.
+# `"/CPU:0"` moves LORE to the CPU **while leaving the GPU visible and free** for the other
+# engines: `run_posthoc_xai` passes the device to `load_run_model`, so the variables are BORN
+# on the CPU. That is the only point at which the choice takes effect.
 #
-# ⚠️ Il `tf.device` attorno al solo calcolo (quello in `xai_lore_sa.on_epoch_end`) NON basta
-# e da solo fallisce — provato il 02/08, ~20 s per run:
+# ⚠️ A `tf.device` around the computation alone (the one in `xai_lore_sa.on_epoch_end`) is
+# NOT enough and fails on its own — tried 02/08, ~20 s per run:
 #     InvalidArgumentError: Trying to access resource stem_conv/kernel/... located in
 #     device /...GPU:0 from device /...CPU:0
-# perche' `tf.device` non sposta le variabili gia' allocate e la `predict` di Keras 3 e'
-# compilata con XLA, che rifiuta la variabile remota invece di copiarla.
+# because `tf.device` does not move variables already allocated, and Keras 3's `predict` is
+# XLA-compiled, which refuses the remote variable instead of copying it.
 #
-# Costo MISURATO il 02/08 su 6 run: **20,0 min/run su CPU** contro i 22 min su GPU. La CPU
-# non costa niente, e' anzi leggermente piu' veloce — coerente con il fatto che la GPU serviva
-# solo alla CNN. Quindi `"/CPU:0"` e' la scelta giusta per il giro lungo, non un ripiego.
+# Cost MEASURED 02/08 over 6 runs: **20.0 min/run on CPU** against 22 min on GPU. The CPU
+# costs nothing and is in fact slightly faster — consistent with the GPU only ever serving
+# the CNN. So `"/CPU:0"` is the right choice for the long pass, not a fallback.
 LORE_SA_DEVICE = None
 
 ALL_ENGINES = ("shap", "gradcam", "lore")
@@ -150,8 +149,8 @@ def _status_key_for(engine):
 
 
 # --------------------------------------------------------------------------------------
-# Canonical-artifact write guard  (added 2026-07-29, Claudio: "non voglio assolutamente
-# sovrascrivere le run canoniche che hanno gia' prodotto i loro artefatti")
+# Canonical-artifact write guard  (added 2026-07-29: canonical runs that have already
+# produced their artifacts must never be overwritten)
 #
 # The trap this closes: `run_posthoc_xai` skips only when `xai/xai_status.json` says every
 # engine is "ok" -- and that file is written by THIS driver, so none of the 110 canonical
@@ -173,11 +172,11 @@ CANONICAL_WRITE_GUARD = True
 
 # Everything each engine's callback writes under `run_dir/xai/`, per engine.
 #
-# I due motori LORE scrivono nella STESSA `xai/lore/` ma in sottocartelle e CSV distinti
-# (`epoch*/context` + `lore_fidelity_per_epoch.csv` contro `epoch*/tabular_sa` +
-# `lore_sa_per_epoch.csv`).  Tenerli separati qui e' quello che permette di aggiungere il
-# motore nuovo a una run che ha gia' quello legacy SENZA `allow_clobber` -- cioe' senza
-# aprire anche la porta a sovrascrivere il legacy nella stessa chiamata.
+# The two LORE engines write into the SAME `xai/lore/` but in distinct subfolders and CSVs
+# (`epoch*/context` + `lore_fidelity_per_epoch.csv` against `epoch*/tabular_sa` +
+# `lore_sa_per_epoch.csv`). Keeping them separate here is what allows adding the new engine
+# to a run that already has the legacy one WITHOUT `allow_clobber` -- that is, without also
+# opening the door to overwriting the legacy one in the same call.
 def shap_subdir():
     """`shap` o `shap_tab`, secondo che un campione XAI sia adottato o no.
 

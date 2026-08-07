@@ -1,52 +1,55 @@
-"""Campione stratificato per la XAI.
+"""The XAI evaluation sample.
 
-⚠️ LEGGERE PRIMA: LA MOTIVAZIONE ORIGINALE DI QUESTO MODULO ERA SBAGLIATA
---------------------------------------------------------------------------
-Questo modulo era nato (31/07) per correggere una presunta distorsione del prefisso: «i primi
-32 campioni hanno il 40.6% di maligni contro il 9.1% del validation». **Quel 9.1% e' sbagliato**:
-veniva da `neg_sample = 0.01` senza vedere la riga dopo, `pos_sample = 5.0` — i positivi sono
-upsamplati 5x. La prevalenza vera e' **0.334**, il prefisso a 0.406 su n=32 da' **P = 0.245**,
-cioe' rumore. E `df.sample(frac=1.0)` rimescola prima dello split in fold, quindi «le prime N
-righe» sono gia' un campione casuale.
+⚠️ READ FIRST: THIS MODULE'S ORIGINAL MOTIVATION WAS WRONG
+-----------------------------------------------------------
+It was written (31/07) to correct a supposed prefix bias: "the first 32 samples are 40.6%
+malignant against 9.1% in validation". **That 9.1% is wrong**: it came from
+`neg_sample = 0.01` without reading the next line, `pos_sample = 5.0` -- positives are
+upsampled 5x. True prevalence is **0.334**, and a prefix at 0.406 over n=32 gives
+**P = 0.245**, i.e. noise. On top of that `df.sample(frac=1.0)` shuffles before the fold
+split, so "the first N rows" are already a random sample.
 
-**Non c'e' nessuna distorsione del prefisso da correggere.** Il modulo resta perche' fa comunque
-due cose utili — quote di classe esatte e un'identita' verificabile del campione — ma non
-spacciarlo per una correzione di bias.
+**There is no prefix bias to correct.** The module stays because it still does two useful
+things -- exact class quotas and a verifiable sample identity -- but it must not be sold
+as a bias fix.
 
-IL PROBLEMA VERO, QUELLO SI'
-----------------------------
-`pos_sample=5.0` usa `replace=True`: 364 positivi unici diventano 1820 righe. Sul campione
-stratificato n=256 ci sono **222 lesioni uniche** su 256 righe, e fra gli 85 positivi solo **51
-lesioni uniche** (molteplicita' fino a 3). La XAI spiega la stessa lesione piu' volte: i campioni
-non sono indipendenti e **ogni intervallo di confidenza per run e' ottimistico**.
+THE REAL PROBLEM, THAT ONE IS REAL
+----------------------------------
+`pos_sample=5.0` uses `replace=True`: 364 unique positives become 1820 rows. In the
+stratified n=256 sample there are **222 unique lesions** over 256 rows, and among the 85
+positives only **51 unique lesions** (multiplicity up to 3). The XAI explains the same
+lesion several times: the samples are not independent and **every per-run confidence
+interval is optimistic**.
 
-Il rimedio e' deduplicare sull'identita' di riga, non stratificare: `unique_lesion_subset` (+ `adopt`),
-usato in produzione dal 31/07 con n=144 lesioni distinte, balance='equal'.
+The remedy is to deduplicate on row identity, not to stratify: `unique_lesion_subset`
+(+ `adopt`), in production since 31/07 with n=144 distinct lesions, balance='equal'.
 
-⚠️ E IL PREFISSO DI *QUESTO* CAMPIONE E' SBILANCIATO SUL SERIO (misurato 2026-08-01)
-------------------------------------------------------------------------------------
-Non contraddice quanto sopra: il prefisso di `validation_df` sta davvero a 0.336. Ma
-`unique_lesion_subset` tiene la PRIMA occorrenza di ogni lesione, che per un positivo e' il
-minimo di ~5 copie (`pos_sample=5.0`) e per un negativo un'estrazione sola. Ordinando gli
-indici i positivi finiscono davanti: mediana dell'indice 160 sui positivi contro 581 sui
-negativi. Sul campione n=144 (50/50 per costruzione) i primi 48 sono **35 pos / 13 neg**.
+⚠️ AND THE PREFIX OF *THIS* SAMPLE REALLY IS IMBALANCED (measured 2026-08-01)
+-----------------------------------------------------------------------------
+This does not contradict the above: the prefix of `validation_df` really does sit at 0.336.
+But `unique_lesion_subset` keeps the FIRST occurrence of each lesion, which for a positive
+is the minimum of ~5 copies (`pos_sample=5.0`) and for a negative a single draw. Sorting
+the indices pushes positives to the front: median index 160 on positives against 581 on
+negatives. In the n=144 sample (50/50 by construction) the first 48 rows are **35 pos /
+13 neg**.
 
-Quindi: per spiegarne un sottoinsieme si passa un array di indici ESPLICITO e bilanciato,
-non si lascia troncare `max_explain_samples`. Confronti fra strategie restano validi (tutte
-le run vedono gli stessi campioni); livelli assoluti e contrasti fra classi no.
+So: to explain a subset, pass an EXPLICIT balanced index array; never let
+`max_explain_samples` truncate. Comparisons between strategies stay valid (every run sees
+the same samples); absolute levels and between-class contrasts do not.
 
-DOVE FINISCONO GLI ARTEFATTI (dal 2026-08-01)
----------------------------------------------
-Dentro la run, in sottocartelle proprie: `<run_dir>/xai/shap_tab/` e
-`<run_dir>/xai/lore_sa/` (vedi `out_dir_for`). Solo cio' che e' cross-run — tabelle e
-figure di confronto fra famiglie, `report()` — sta in `runs/_faithfulness/`.
+WHERE THE ARTIFACTS GO (since 2026-08-01)
+-----------------------------------------
+Inside the run, in their own subfolders: `<run_dir>/xai/shap_tab/` and
+`<run_dir>/xai/lore_sa/` (see `out_dir_for`). Only what is cross-run -- the between-family
+tables and figures, `report()` -- lives in `runs/_faithfulness/`.
 
-COSA RESTA VALIDO
------------------
-L'impronta (`subset_fingerprint`) e il guard che ne discende in `xai_faithfulness`: gli npz SHAP
-salvano `explained_indices` come POSIZIONI, quindi riusarli sotto un campione diverso accoppia i
-valori SHAP di certe righe alle feature di altre lesioni, senza errore e con numeri plausibili.
-Quello e' un rischio reale a prescindere da quale campione si scelga.
+WHAT REMAINS VALID
+------------------
+The fingerprint (`subset_fingerprint`) and the guard that follows from it in
+`xai_faithfulness`: the SHAP npz store `explained_indices` as POSITIONS, so reusing them
+under a different sample pairs the SHAP values of some rows with the features of other
+lesions, with no error and with plausible numbers. That risk is real whichever sample is
+chosen.
 """
 
 from __future__ import annotations
@@ -59,32 +62,32 @@ import numpy as np
 
 from . import paths as _paths
 
-# Gli artefatti PER RUN vivono dentro la run (vedi `out_dir_for` piu' sotto). Qui resta
-# solo la destinazione di cio' che e' CROSS-RUN e quindi non appartiene a nessuna: tabelle
-# e figure di confronto fra famiglie.
+# PER-RUN artifacts live inside the run (see `out_dir_for` below). What is left here is the
+# destination of what is CROSS-RUN and therefore belongs to none of them: the between-family
+# tables and figures.
 AGGREGATE_DIRNAME = "_faithfulness"
 
 
 def stratified_subset(labels, n, seed=0):
-    """Indici POSIZIONALI in `validation_df` di un campione stratificato per classe.
+    """POSITIONAL indices into `validation_df` of a class-stratified sample.
 
-    Proporzionale: la prevalenza del campione riproduce quella del pool (a meno
-    dell'arrotondamento).  Deterministico dato `seed`.  Restituisce indici ORDINATI, perche'
-    `_build_faith_subset` legge il dataset in ordine e poi indicizza.
+    Proportional: the sample prevalence reproduces the pool's (up to rounding).
+    Deterministic given `seed`. Returns SORTED indices, because `_build_faith_subset` reads
+    the dataset in order and then indexes into it.
 
-    NB non corregge nessuna distorsione del prefisso -- quella non esiste, vedi il docstring
-    del modulo.  Garantisce le quote di classe ESATTE invece che in distribuzione, il che
-    toglie una fonte di varianza fra campioni ma non sposta il valore atteso.
+    NB it corrects no prefix bias -- there is none, see the module docstring. It guarantees
+    EXACT class quotas rather than quotas in distribution, which removes one source of
+    variance between samples without moving the expected value.
     """
     y = np.asarray(labels).reshape(-1)
     n = int(n)
     if n > len(y):
-        raise ValueError(f"n={n} > {len(y)} campioni disponibili nel validation set")
+        raise ValueError(f"n={n} > {len(y)} samples available in the validation set")
     rng = np.random.default_rng(seed)
     out = []
     classes = np.unique(y)
-    # Quota proporzionale, poi si distribuiscono i resti dalla classe piu' grande in giu':
-    # deterministico invece che dipendente dall'ordine di iterazione delle classi.
+    # Proportional quota, then the remainders are handed out from the largest class down:
+    # deterministic instead of dependent on the class iteration order.
     quotas = {}
     for c in classes:
         idx_c = np.flatnonzero(y == c)
@@ -100,35 +103,35 @@ def stratified_subset(labels, n, seed=0):
         k = min(quotas[c], len(idx_c))
         out.append(rng.choice(idx_c, size=k, replace=False))
     idx = np.sort(np.concatenate(out))
-    assert len(idx) == n, f"quote non tornano: {len(idx)} != {n}"
+    assert len(idx) == n, f"quotas do not add up: {len(idx)} != {n}"
     return idx
 
 
 def unique_lesion_subset(ids, labels, n=None, seed=0, balance="pool"):
-    """Indici POSIZIONALI su **lesioni distinte**: una riga per identita', mai due.
+    """POSITIONAL indices over **distinct lesions**: one row per identity, never two.
 
-    E' il rimedio al problema vero: `pos_sample=5.0` con `replace=True` fa comparire la stessa
-    lesione ~5 volte, e le copie sono repliche ESATTE (stessa immagine, stesse feature, stessa
-    predizione). Spiegarle piu' volte non aggiunge informazione, restringe gli intervalli e
-    basta.
+    This is the remedy to the real problem: `pos_sample=5.0` with `replace=True` makes the
+    same lesion appear ~5 times, and the copies are EXACT replicas (same image, same
+    features, same prediction). Explaining them repeatedly adds no information, it only
+    narrows the intervals.
 
     ``balance``:
-      * ``"pool"``  -- prevalenza proporzionale a quella delle LESIONI uniche;
-      * ``"equal"`` -- meta' per classe. Massimizza la potenza del contrasto fra classi a
-        parita' di costo; il livello assoluto non e' piu' quello della popolazione, ma resta
-        confrontabile fra strategie perche' il campione e' lo stesso per tutte;
-      * ``"all"``   -- ogni lesione distinta, nessun campionamento (``n`` ignorato).
+      * ``"pool"``  -- prevalence proportional to that of the UNIQUE lesions;
+      * ``"equal"`` -- half per class. Maximizes the power of the between-class contrast at
+        equal cost; the absolute level is no longer the population's, but stays comparable
+        between strategies because the sample is the same for all of them;
+      * ``"all"``   -- every distinct lesion, no sampling (``n`` ignored).
 
-    Solleva se ``n`` non e' ottenibile, dicendo qual e' il massimo: il modo peggiore di
-    fallire qui sarebbe restituire in silenzio meno positivi di quelli chiesti.
+    Raises when ``n`` is not attainable, saying what the maximum is: the worst way to fail
+    here would be to silently return fewer positives than asked for.
     """
     ids = np.asarray(ids)
     y = np.asarray(labels).reshape(-1)
     if len(ids) != len(y):
-        raise ValueError(f"ids ({len(ids)}) e labels ({len(y)}) di lunghezza diversa")
+        raise ValueError(f"ids ({len(ids)}) and labels ({len(y)}) have different lengths")
 
-    # Un rappresentante per lesione: la PRIMA occorrenza. Deterministico e indipendente dal
-    # seed, cosi' due campioni con seed diversi pescano fra le stesse lesioni.
+    # One representative per lesion: the FIRST occurrence. Deterministic and independent of
+    # the seed, so two samples with different seeds draw from the same lesions.
     _, first = np.unique(ids, return_index=True)
     rep = np.sort(first)
     y_rep = y[rep]
@@ -139,7 +142,7 @@ def unique_lesion_subset(ids, labels, n=None, seed=0, balance="pool"):
         return rep, {"balance": "all", "n": len(rep), "per_class": avail,
                      "n_unique_available": {int(c): v for c, v in avail.items()}}
     if n is None:
-        raise ValueError("n e' obbligatorio se balance != 'all'")
+        raise ValueError("n is required unless balance == 'all'")
     n = int(n)
 
     if balance == "equal":
@@ -156,21 +159,21 @@ def unique_lesion_subset(ids, labels, n=None, seed=0, balance="pool"):
             want[c] += 1
             left -= 1
     else:
-        raise ValueError(f"balance={balance!r}: attesi 'pool', 'equal' o 'all'")
+        raise ValueError(f"balance={balance!r}: expected 'pool', 'equal' or 'all'")
 
     short = {c: (want[c], avail[c]) for c in want if want[c] > avail[c]}
     if short:
-        # Il massimo ottenibile dipende dal balance:
-        #   'pool'  -> proporzionale sulle lesioni uniche: si arriva fino a TUTTE (n<=len(rep));
-        #   'equal' -> lo limita la classe piu' piccola, 2x quella (qui i positivi unici).
+        # The attainable maximum depends on the balance:
+        #   'pool'  -> proportional over unique lesions: reaches ALL of them (n<=len(rep));
+        #   'equal' -> bounded by the smallest class, 2x that (here the unique positives).
         n_max = len(rep) if balance == "pool" else min(avail.values()) * len(classes)
         raise ValueError(
-            f"n={n} non ottenibile su lesioni distinte con balance={balance!r}.\n"
-            f"  lesioni uniche per classe: {avail}  (totale {len(rep)})\n"
-            f"  servirebbero {dict(want)}\n"
-            f"  n massimo con questo balance: {n_max}\n"
-            f"  alternative: n<={n_max}, balance='all' (tutte le {len(rep)} lesioni), "
-            f"oppure balance='pool' se stai usando 'equal'.")
+            f"n={n} not attainable over distinct lesions with balance={balance!r}.\n"
+            f"  unique lesions per class: {avail}  (total {len(rep)})\n"
+            f"  it would need {dict(want)}\n"
+            f"  maximum n with this balance: {n_max}\n"
+            f"  alternatives: n<={n_max}, balance='all' (all {len(rep)} lesions), "
+            f"or balance='pool' if you are using 'equal'.")
 
     rng = np.random.default_rng(seed)
     out = []
@@ -178,31 +181,31 @@ def unique_lesion_subset(ids, labels, n=None, seed=0, balance="pool"):
         pool_c = rep[y_rep == c]
         out.append(rng.choice(pool_c, size=want[int(c)], replace=False))
     idx = np.sort(np.concatenate(out))
-    assert len(np.unique(ids[idx])) == len(idx), "il campione contiene lesioni ripetute"
+    assert len(np.unique(ids[idx])) == len(idx), "the sample holds repeated lesions"
     return idx, {"balance": balance, "n": len(idx),
                  "per_class": {int(c): int(np.sum(y[idx] == c)) for c in classes},
                  "n_unique_available": avail}
 
 
 def subset_fingerprint(ids_all, idx, seed, n, kind="stratified"):
-    """Identita' del campione. E' questa che impedisce di mescolare ordinamenti diversi.
+    """The sample's identity. This is what stops two different orderings being mixed.
 
-    Include gli id di riga NELL'ORDINE del campione, non solo il conteggio: due campioni
-    della stessa dimensione sullo stesso validation set devono avere impronte diverse.
+    It includes the row ids IN THE SAMPLE'S ORDER, not just the count: two samples of the
+    same size over the same validation set must have different fingerprints.
     """
     ids = [str(ids_all[i]) for i in np.asarray(idx, int)]
     h = hashlib.sha256(("|".join(ids) + f"|{kind}|{seed}|{n}").encode()).hexdigest()[:16]
     return f"{kind}-s{seed}-n{n}-{h}"
 
 
-# L'impronta del comportamento STORICO: le prime N righe. Ogni artefatto canonico e' stato
-# prodotto cosi' e non porta stampigliatura, quindi "nessuna stampigliatura" == questo.
+# The fingerprint of the HISTORICAL behaviour: the first N rows. Every canonical artifact
+# was produced that way and carries no stamp, so "no stamp" == this.
 PREFIX_FINGERPRINT = "prefix"
 
 
 def save_snapshot(path, ids_all, idx, seed, n, kind="stratified", extra=None):
-    """Scrive il campione su disco. Gli ID, non solo gli indici: gli indici da soli non
-    sopravvivono a un ricalcolo del fold."""
+    """Write the sample to disk. The IDs, not only the indices: indices alone do not
+    survive a recomputation of the fold."""
     fp = subset_fingerprint(ids_all, idx, seed, n, kind=kind)
     snap = {
         "fingerprint": fp, "kind": kind, "seed": int(seed), "n": int(n),
@@ -222,78 +225,78 @@ def load_snapshot(path):
 
 
 def verify_snapshot(snap, ids_all):
-    """Il campione salvato descrive ANCORA questo validation set?
+    """Does the saved sample STILL describe this validation set?
 
-    Se il fold viene ricostruito diversamente, gli indici posizionali puntano ad altre
-    lesioni: qui si solleva invece di produrre numeri plausibili e sbagliati.
+    If the fold is rebuilt differently, the positional indices point at other lesions: this
+    raises instead of producing plausible, wrong numbers.
     """
     idx = np.asarray(snap["positional_idx"], int)
     if int(np.max(idx)) >= len(ids_all):
         raise RuntimeError(
-            f"snapshot fuori range: indice max {int(np.max(idx))} su {len(ids_all)} righe "
-            f"di validation. Il fold e' cambiato: rigenera il campione.")
+            f"snapshot out of range: max index {int(np.max(idx))} over {len(ids_all)} "
+            f"validation rows. The fold has changed: regenerate the sample.")
     have = [str(ids_all[i]) for i in idx]
-    # `isic_ids`: chiave degli snapshot scritti prima che l'identita' avesse un nome neutro.
+    # `isic_ids`: the key of snapshots written before row identity had a neutral name.
     want = list(snap.get("row_ids", snap.get("isic_ids", [])))
     if have != want:
         n_bad = sum(a != b for a, b in zip(have, want))
         raise RuntimeError(
-            f"snapshot NON corrisponde al validation set corrente: {n_bad}/{len(idx)} id "
-            f"diversi alle stesse posizioni. Gli artefatti gia' prodotti con l'impronta "
-            f"{snap['fingerprint']} NON sono confrontabili con questa sessione.")
+            f"snapshot does NOT match the current validation set: {n_bad}/{len(idx)} ids "
+            f"differ at the same positions. The artifacts already produced under fingerprint "
+            f"{snap['fingerprint']} are NOT comparable with this session.")
     return snap["fingerprint"]
 
 
 # --------------------------------------------------------------------------------------
-# DOVE VANNO GLI ARTEFATTI DEL CAMPIONE  (rifatto il 2026-08-01, richiesta di Claudio:
-# "ogni artefatto relativo alla run deve stare nella cartella originale della run")
+# WHERE THE SAMPLE'S ARTIFACTS GO  (redone 2026-08-01: "every artifact of a run must live
+# in that run's own folder")
 #
-# Prima esisteva una radice parallela `runs/_subset/<run_id__>/`, che replicava l'albero
-# delle run e teneva gli artefatti lontani dai canonici. Teneva davvero, ma spargeva la
-# stessa run su due posti e non era la struttura da portarsi sui dataset nuovi.
+# There used to be a parallel root `runs/_subset/<run_id__>/`, mirroring the run tree and
+# keeping these artifacts away from the canonical ones. It did keep them apart, but it
+# spread one run over two places and was not the structure to carry to new datasets.
 #
-# Ora si scrive DENTRO la run, in sottocartelle che nessun motore canonico usa:
+# Now they are written INSIDE the run, in subfolders no canonical engine uses:
 #
-#     <run_dir>/xai/shap_tab/   attribuzione tabellare allineata + fedelta' con segno
-#     <run_dir>/xai/lore_sa/    LORE-SA (regole per campione)
+#     <run_dir>/xai/shap_tab/   aligned tabular attribution + signed faithfulness
+#     <run_dir>/xai/lore_sa/    LORE-SA (per-sample rules)
 #
-# La separazione dai canonici la fa il NOME della cartella, non la distanza: `xai/shap/`,
-# `xai/gradcam/`, `xai/lore/` e `xai/faithfulness/` restano intatti e nessuna scrittura
-# nuova puo' finirci dentro (cfr. il SUBSET GUARD in `xai_faithfulness`, che continua a
-# rifiutare `xai/faithfulness/` finche' un campione e' adottato).
+# Separation from the canonical artifacts comes from the folder NAME, not from distance:
+# `xai/shap/`, `xai/gradcam/`, `xai/lore/` and `xai/faithfulness/` stay untouched and no new
+# write can land in them (cf. the SUBSET GUARD in `xai_faithfulness`, which keeps refusing
+# `xai/faithfulness/` while a sample is adopted).
 #
-# La stampigliatura di ripresa vive nella stessa sottocartella dell'artefatto, quindi le
-# due riprese sono indipendenti per costruzione e il prefisso `lore-` sull'impronta --
-# che serviva solo a separarle quando condividevano una directory -- non serve piu'.
+# The resume stamp lives in the same subfolder as the artifact, so the two resumes are
+# independent by construction and the `lore-` prefix on the fingerprint -- which only served
+# to separate them when they shared a directory -- is no longer needed.
 # --------------------------------------------------------------------------------------
 SUBSET_KINDS = ("shap_tab", "lore_sa", "gradcam_img")
 
-# Le cartelle nuove per motore, e i "compiti" che ciascuna ospita. `shap_tab` ne ha DUE
-# (gli array SHAP e la fedelta' con segno), quindi li' la stampigliatura deve dire quale.
+# The per-engine folders, and the "tasks" each one hosts. `shap_tab` holds TWO of them (the
+# SHAP arrays and the signed faithfulness), so its stamp has to say which.
 SUBSET_TASKS = {"shap_tab": ("faith", "shap"), "lore_sa": ("lore",),
                 "gradcam_img": ("gradcam",)}
 
 
-# La ri-radicazione dei `run_dir` sta in `paths`, che e' il modulo dei percorsi: qui resta
-# il nome con cui il resto del codice la chiama gia'. Era la stessa riga copiata sei volte.
+# Re-rooting a `run_dir` lives in `paths`, the paths module: what stays here is the name the
+# rest of the code already calls it by. It used to be the same line copied six times.
 run_dir_abs = _paths.run_dir_abs
 
 
 def out_dir_for(run_dir, kind):
-    """Dove vanno gli artefatti di `kind` per questa run. `kind` in SUBSET_KINDS."""
+    """Where the `kind` artifacts of this run go. `kind` in SUBSET_KINDS."""
     if kind not in SUBSET_KINDS:
-        raise ValueError(f"kind={kind!r}: attesi {SUBSET_KINDS}")
+        raise ValueError(f"kind={kind!r}: expected {SUBSET_KINDS}")
     return os.path.join(run_dir, "xai", kind)
 
 
 def stamp_path(run_dir, kind, fp, task=None):
-    """Il file che dice 'questo compito e' gia' fatto CON QUESTA impronta'.
+    """The file saying 'this task is already done UNDER THIS fingerprint'.
 
-    ⚠️ `task=None` deve produrre ESATTAMENTE `DONE.<fp>.json`, il nome che hanno gia' le
-    110 stampigliature della fedelta' e le 8 di LORE.  Cambiarlo significherebbe rifare
-    sei ore di fedelta' al primo rilancio, senza che nessuno se ne accorga finche' la GPU
-    non e' occupata.  Il `task` esiste solo per il secondo compito di `shap_tab` (gli array
-    SHAP), che convive con il primo nella stessa cartella.
+    ⚠️ `task=None` must produce EXACTLY `DONE.<fp>.json`, the name already carried by the
+    110 faithfulness stamps and the 8 LORE ones. Changing it would mean redoing six hours of
+    faithfulness on the next launch, with nobody noticing until the GPU is busy. `task`
+    exists only for the second task of `shap_tab` (the SHAP arrays), which shares the folder
+    with the first.
     """
     name = f"DONE.{fp}.json" if task is None else f"DONE.{task}.{fp}.json"
     return os.path.join(out_dir_for(run_dir, kind), name)
@@ -304,11 +307,10 @@ def is_done(run_dir, kind, fp, task=None):
 
 
 def mark_done(run_dir, kind, fp, payload=None, task=None):
-    """Scritto SOLO a calcolo finito.
+    """Written ONLY once the computation is finished.
 
-    E' la ragione per cui l'interruzione e' sicura: una run interrotta a meta' non lascia
-    stampigliatura, quindi al riavvio viene rifatta da capo. La granularita' della ripresa
-    e' la RUN, non il campione."""
+    This is why interrupting is safe: a run cut in half leaves no stamp, so on restart it is
+    redone from scratch. The granularity of a resume is the RUN, not the sample."""
     p = stamp_path(run_dir, kind, fp, task)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w") as f:
@@ -318,10 +320,10 @@ def mark_done(run_dir, kind, fp, payload=None, task=None):
 
 
 def resume_report(run_dirs, kind, fp, task=None):
-    """(da_fare, gia_fatte) — da stampare PRIMA di lanciare, cosi' si sa cosa costera'.
+    """(todo, done) — to be printed BEFORE launching, so the cost is known in advance.
 
-    `run_dirs` e' un dict {run_id: run_dir} (o un iterabile di coppie): la ripresa e' per
-    run, e le chiavi tornano indietro cosi' che il chiamante stampi i run_id e non i path.
+    `run_dirs` is a dict {run_id: run_dir} (or an iterable of pairs): resuming works per run,
+    and the keys come back so the caller prints run_ids rather than paths.
     """
     items = list(run_dirs.items() if hasattr(run_dirs, "items") else run_dirs)
     done = [rid for rid, d in items if is_done(d, kind, fp, task)]
@@ -329,10 +331,10 @@ def resume_report(run_dirs, kind, fp, task=None):
     return todo, done
 
 
-# Il piano di lavoro: quale motore scrive dove, con quale stampigliatura, e quanto costa.
-# `sec_per_sample` sono misure, non stime: SHAP 30/07, LORE 02/08 su 6 run su CPU (20.0 min
-# a n=48; su GPU erano 22, vedi `xai_driver.LORE_SA_DEVICE`). Grad-CAM e' None finche' non lo
-# si misura sulla prima run.
+# The work plan: which engine writes where, under which stamp, and what it costs.
+# `sec_per_sample` are measurements, not estimates: SHAP 30/07, LORE 02/08 over 6 runs on CPU
+# (20.0 min at n=48; on GPU it was 22, see `xai_driver.LORE_SA_DEVICE`). Grad-CAM stays None
+# until it is measured on the first run.
 JOBS = {
     "shap":    dict(kind="shap_tab",    task="shap",  engines=("shap",),    sec_per_sample=1.2),
     "lore":    dict(kind="lore_sa",     task=None,    engines=("lore",),    sec_per_sample=25.0),
@@ -341,34 +343,34 @@ JOBS = {
 
 
 # --------------------------------------------------------------------------------------
-# Statistica con il RUN come unita'
+# Statistics with the RUN as the unit
 #
-# Tutte le run della XAI vedono lo STESSO campione di validation. Quindi 10 run x 32
-# campioni NON sono 320 osservazioni: sono 32 lesioni viste da 10 modelli. Poolare le righe
-# fra run viola l'indipendenza nel modo peggiore e il p-value che ne esce e' ottimistico.
+# Every XAI run sees the SAME validation sample. So 10 runs x 32 samples are NOT 320
+# observations: they are 32 lesions seen by 10 models. Pooling rows across runs violates
+# independence in the worst way and the resulting p-value is optimistic.
 #
-# Costato caro il 31/07: il class-wise LORE dava chi2 poolato p=0.0016 ("il risultato piu'
-# solido"); con il run come unita' diventa Wilcoxon p=0.047 e test dei segni p=0.75 --
-# suggestivo, non stabilito.
+# It cost dearly on 31/07: class-wise LORE gave a pooled chi2 p=0.0016 ("the most solid
+# result"); with the run as the unit it becomes Wilcoxon p=0.047 and a sign test p=0.75 --
+# suggestive, not established.
 # --------------------------------------------------------------------------------------
 
 def across_runs(per_run_a, per_run_b, name_a="A", name_b="B", drop_ties=True):
-    """Contrasto appaiato fra due quantita' misurate su ogni run.
+    """Paired contrast between two quantities measured on every run.
 
-    Un valore per RUN, non per campione. Restituisce test dei segni e Wilcoxon: il primo usa
-    solo la direzione, il secondo anche le ampiezze, e vanno letti insieme -- se divergono,
-    l'effetto sta in pochi run con differenze grandi.
+    One value per RUN, not per sample. Returns a sign test and a Wilcoxon: the first uses
+    the direction only, the second the magnitudes as well, and they are read together --
+    when they diverge, the effect lives in a few runs with large differences.
 
-    ``drop_ties`` toglie i run con differenza esattamente nulla. Vanno tolti E DICHIARATI:
-    tipicamente sono saturi per costruzione (copertura 0 vs 0, o 1 vs 1) e non possono
-    mostrare l'effetto, ma il test dei segni li conterebbe come non-positivi.
+    ``drop_ties`` removes the runs whose difference is exactly zero. They must be removed
+    AND DECLARED: typically they are saturated by construction (coverage 0 vs 0, or 1 vs 1)
+    and cannot show the effect, yet the sign test would count them as non-positive.
     """
     from scipy import stats
 
     a = np.asarray(per_run_a, float)
     b = np.asarray(per_run_b, float)
     if a.shape != b.shape:
-        raise ValueError(f"servono valori appaiati per run: {a.shape} vs {b.shape}")
+        raise ValueError(f"paired per-run values are required: {a.shape} vs {b.shape}")
     ok = ~(np.isnan(a) | np.isnan(b))
     a, b = a[ok], b[ok]
     d = b - a
@@ -376,73 +378,73 @@ def across_runs(per_run_a, per_run_b, name_a="A", name_b="B", drop_ties=True):
     inf = d != 0 if drop_ties else np.ones_like(d, bool)
     n_inf = int(inf.sum())
     res = {
-        "n_run": int(d.size), "n_informativi": n_inf, "n_pari": int(d.size - n_inf),
-        "n_positivi": int((d > 0).sum()),
-        "diff_mediana": float(np.median(d)) if d.size else float("nan"),
-        "diff_media": float(np.mean(d)) if d.size else float("nan"),
+        "n_run": int(d.size), "n_informative": n_inf, "n_ties": int(d.size - n_inf),
+        "n_positive": int((d > 0).sum()),
+        "diff_median": float(np.median(d)) if d.size else float("nan"),
+        "diff_mean": float(np.mean(d)) if d.size else float("nan"),
         "name_a": name_a, "name_b": name_b,
     }
-    res["segni_p"] = (float(stats.binomtest(int((d[inf] > 0).sum()), n_inf, 0.5).pvalue)
-                      if n_inf else float("nan"))
+    res["sign_p"] = (float(stats.binomtest(int((d[inf] > 0).sum()), n_inf, 0.5).pvalue)
+                     if n_inf else float("nan"))
     res["wilcoxon_p"] = (float(stats.wilcoxon(d[inf]).pvalue) if n_inf >= 6 else float("nan"))
     if n_inf < 6:
-        # Con meno di 6 run informativi il Wilcoxon non puo' scendere sotto 0.05 nemmeno con
-        # tutte le differenze concordi: restituirlo darebbe l'idea di un test che non c'e'.
-        res["nota"] = f"solo {n_inf} run informativi: Wilcoxon non applicabile (servono >=6)"
+        # With fewer than 6 informative runs Wilcoxon cannot go below 0.05 even when every
+        # difference agrees in sign: returning it would suggest a test that is not there.
+        res["note"] = f"only {n_inf} informative runs: Wilcoxon not applicable (>=6 needed)"
     return res
 
 
 def print_across_runs(res, indent="  "):
-    """Le stesse cifre in forma leggibile, coi caveat attaccati invece che in una nota a parte."""
-    print(f"{indent}{res['name_b']} vs {res['name_a']} — unita' = run, non campione")
-    print(f"{indent}  run: {res['n_run']} totali, {res['n_informativi']} informativi, "
-          f"{res['n_pari']} a differenza nulla (saturi/degeneri, esclusi dai test)")
-    print(f"{indent}  a favore di {res['name_b']}: {res['n_positivi']}/{res['n_run']}")
-    print(f"{indent}  differenza mediana {res['diff_mediana']:+.3f} (media {res['diff_media']:+.3f})")
-    print(f"{indent}  test dei segni  p = {res['segni_p']:.4f}"
-          if res['segni_p'] == res['segni_p'] else f"{indent}  test dei segni  n/d")
-    if res.get("nota"):
-        print(f"{indent}  Wilcoxon        n/d — {res['nota']}")
+    """The same figures in readable form, with the caveats attached rather than footnoted."""
+    print(f"{indent}{res['name_b']} vs {res['name_a']} — unit = run, not sample")
+    print(f"{indent}  runs: {res['n_run']} total, {res['n_informative']} informative, "
+          f"{res['n_ties']} at zero difference (saturated/degenerate, excluded from the tests)")
+    print(f"{indent}  in favour of {res['name_b']}: {res['n_positive']}/{res['n_run']}")
+    print(f"{indent}  median difference {res['diff_median']:+.3f} (mean {res['diff_mean']:+.3f})")
+    print(f"{indent}  sign test       p = {res['sign_p']:.4f}"
+          if res['sign_p'] == res['sign_p'] else f"{indent}  sign test       n/a")
+    if res.get("note"):
+        print(f"{indent}  Wilcoxon        n/a — {res['note']}")
     else:
         print(f"{indent}  Wilcoxon        p = {res['wilcoxon_p']:.4f}")
     if res['n_run'] < 8:
-        print(f"{indent}  ⚠ {res['n_run']} run: qualunque p qui e' fragile. Piu' seed, non piu' campioni.")
+        print(f"{indent}  ⚠ {res['n_run']} runs: any p here is fragile. More seeds, not more samples.")
 
 
 # --------------------------------------------------------------------------------------
-# Il punto di iniezione unico
+# The single injection point
 # --------------------------------------------------------------------------------------
 
 def adopt(validation_df, n=None, balance="pool", seed=0, snapshot_dir=None,
           apply_to=("faithfulness", "lore", "shap"), verbose=True):
-    """Sceglie il campione XAI **una volta per sessione** e lo rende il default di tutti.
+    """Pick the XAI sample **once per session** and make it everyone's default.
 
-    Va chiamata subito dopo `xf.configure(...)`, negli STESSI due punti nei due notebook.
-    Da li' in poi nessuna cella deve passare `subset_idx`: la fedelta' lo eredita da
-    `xf.FAITH_SUBSET_IDX`, LORE e SHAP dai loro kwargs nel driver. E' questo che rende la
-    scelta un default del framework invece di un argomento da ricordarsi.
+    Call it right after `xf.configure(...)`, at the SAME two points in the two notebooks.
+    From there on no cell passes `subset_idx`: faithfulness inherits it from
+    `xf.FAITH_SUBSET_IDX`, LORE and SHAP from their kwargs in the driver. That is what makes
+    the choice a framework default instead of an argument to remember.
 
-    Campiona su **lesioni distinte** (`unique_lesion_subset`): `pos_sample` con
-    `replace=True` fa comparire la stessa lesione piu' volte, e le copie sono repliche
-    esatte che restringono gli intervalli senza aggiungere informazione.
+    It samples over **distinct lesions** (`unique_lesion_subset`): `pos_sample` with
+    `replace=True` makes the same lesion appear several times, and the copies are exact
+    replicas that narrow the intervals without adding information.
 
-    Ritorna ``(idx, info)``.  ``adopt(validation_df, balance=None)`` disarma tutto e
-    ripristina il prefisso storico, che e' come si riproducono i numeri pubblicati.
+    Returns ``(idx, info)``. ``adopt(validation_df, balance=None)`` disarms everything and
+    restores the historical prefix, which is how the published numbers are reproduced.
     """
     from . import xai_driver as xd
     from . import xai_faithfulness as xf
 
-    if balance is None:                                  # ripristino del comportamento storico
+    if balance is None:                                  # restore the historical behaviour
         xf.FAITH_SUBSET_IDX = None
         xf.ACTIVE_SUBSET_FINGERPRINT = None
         xd.LORE_SA_KWARGS.pop("subset_idx", None)
         xd.SHAP_KWARGS.pop("subset_idx", None)
         xd.SHAP_KWARGS.pop("subset_fingerprint", None)
         if verbose:
-            print("[campione] DISARMATO — si torna alle prime N righe (comportamento storico).")
+            print("[sample] DISARMED — back to the first N rows (historical behaviour).")
         return None, {"balance": None}
 
-    ids = register_validation_ids(validation_df)     # da qui gli artefatti prendono l'identita'
+    ids = register_validation_ids(validation_df)     # artifacts take their identity from here
     y = validation_df.target.values
     idx, info = unique_lesion_subset(ids, y, n=n, seed=seed, balance=balance)
 
@@ -451,7 +453,7 @@ def adopt(validation_df, n=None, balance="pool", seed=0, snapshot_dir=None,
     path = os.path.join(snapshot_dir, f"subset.{kind}.n{len(idx)}.seed{seed}.json")
     if os.path.exists(path):
         snap = load_snapshot(path)
-        fp = verify_snapshot(snap, ids)          # solleva se il fold non e' piu' lo stesso
+        fp = verify_snapshot(snap, ids)          # raises if the fold is no longer the same
         idx = np.asarray(snap["positional_idx"], int)
     else:
         fp = save_snapshot(path, ids, idx, seed, len(idx), kind=kind, extra={"info": info})
@@ -462,8 +464,8 @@ def adopt(validation_df, n=None, balance="pool", seed=0, snapshot_dir=None,
     if "lore" in apply_to:
         xd.LORE_SA_KWARGS["subset_idx"] = idx
     if "shap" in apply_to:
-        # max_explain_samples DEVE coprire il campione, altrimenti `_subsample` ne ripesca a
-        # caso un sottoinsieme e l'npz non corrisponde piu' all'impronta che porta stampata.
+        # max_explain_samples MUST cover the sample, otherwise `_subsample` redraws a random
+        # subset of it and the npz no longer matches the fingerprint stamped on it.
         xd.SHAP_KWARGS["subset_idx"] = idx
         xd.SHAP_KWARGS["subset_fingerprint"] = fp
         xd.SHAP_KWARGS["max_explain_samples"] = len(idx)
@@ -472,49 +474,57 @@ def adopt(validation_df, n=None, balance="pool", seed=0, snapshot_dir=None,
 
     if verbose:
         n_u = len(set(ids[idx]))
-        print(f"[campione] {len(idx)} lesioni DISTINTE (balance={balance!r}, seed={seed})")
-        print(f"           per classe: {info['per_class']}   prevalenza {float(np.mean(y[idx])):.3f}")
-        print(f"           uniche disponibili: {info['n_unique_available']}")
-        print(f"           verifica: {n_u}/{len(idx)} id distinti "
-              f"{'OK' if n_u == len(idx) else '** DUPLICATI **'}")
-        print(f"           impronta: {fp}")
-        print(f"           attivo su: {', '.join(apply_to)}")
-        print(f"           snapshot: {path}")
-        print(f"           ripristino del prefisso storico: xs.adopt(validation_df, balance=None)")
+        print(f"[sample] {len(idx)} DISTINCT lesions (balance={balance!r}, seed={seed})")
+        print(f"         per class: {info['per_class']}   prevalence {float(np.mean(y[idx])):.3f}")
+        print(f"         unique available: {info['n_unique_available']}")
+        print(f"         check: {n_u}/{len(idx)} distinct ids "
+              f"{'OK' if n_u == len(idx) else '** DUPLICATES **'}")
+        print(f"         fingerprint: {fp}")
+        print(f"         active on: {', '.join(apply_to)}")
+        print(f"         snapshot: {path}")
+        print(f"         restore the historical prefix: xs.adopt(validation_df, balance=None)")
     return idx, {**info, "fingerprint": fp, "snapshot": path}
 
 
 # --------------------------------------------------------------------------------------
-# Rendiconto CROSS-RUN — tabelle e figure di confronto fra famiglie
+# CROSS-RUN reporting — the between-family tables and figures
 #
-# Sta qui, e non in una cella del notebook, per la richiesta del 2026-08-01: "voglio che la
-# XAI crei direttamente i plot, non che dobbiamo aggiungere ulteriori celle". I loop della
-# fedelta' e di LORE la chiamano in coda; nessuna cella in piu' da ricordarsi di eseguire.
+# It lives here, not in a notebook cell, because of the 2026-08-01 request: "I want the XAI
+# to draw the plots directly, not to have to add more cells". The faithfulness and LORE
+# loops call it at the end; no extra cell to remember to run.
 #
-# Le figure PER RUN le fanno i motori (`xai_faithfulness._plot_aligned_signed_run`,
-# `xai_lore_sa._plot_lore_sa_run`) dentro la run. Qui ci finisce solo cio' che per
-# definizione non appartiene a una run sola.
+# PER-RUN figures are drawn by the engines (`xai_faithfulness._plot_aligned_signed_run`,
+# `xai_lore_sa._plot_lore_sa_run`) inside the run. What lands here is only what by
+# definition belongs to no single run.
 # --------------------------------------------------------------------------------------
-SIGNED_MODES_REPORT = ("posev", "negev", "target")   # `abs` e' il modo-artefatto: ~0, rumore
-Q_CLEAN = 0.20                                       # full budget e' OOD-dominato
+SIGNED_MODES_REPORT = ("posev", "negev", "target")   # `abs` is the artifact mode: ~0, noise
+Q_CLEAN = 0.20                                       # the full budget is OOD-dominated
 
 
 # --------------------------------------------------------------------------------------
-# Ablazioni unimodali — la regola, non una nota in un documento
+# Unimodal ablations — the rule, not a note in a document
 # --------------------------------------------------------------------------------------
-# Agli endpoint di uno sweep un ramo e' SPENTO per costruzione: i loro valori di
-# spiegazione sono algebra, non misura (`lore_coverage` esattamente 0.000 e 1.000, massa
-# SHAP esattamente 0). Sono ablazioni, non punti dello sweep, e non entrano in nessuna
-# media di famiglia. Chi aggiunge una famiglia con endpoint la dichiara QUI: e' l'unico
-# posto che le aggregazioni consultano.
+# At the endpoints of a sweep a branch is OFF by construction: their explanation values are
+# algebra, not measurement (`lore_coverage` exactly 0.000 and 1.000, SHAP mass exactly 0).
+# They are ablations, not sweep points, and they enter no family mean. Whoever adds a family
+# with endpoints declares it HERE: it is the only place the aggregations consult.
 ABLATION_SETTINGS = {
-    ("fixed_scaling", "a0p000"): "tabular",     # alpha=0 -> ramo tabellare spento
-    ("fixed_scaling", "a1p000"): "image",       # alpha=1 -> ramo immagine spento
+    ("fixed_scaling", "a0p000"): "tabular",     # alpha=0 -> tabular branch off
+    ("fixed_scaling", "a1p000"): "image",       # alpha=1 -> image branch off
+}
+
+# The one setting per family the report compares across families: the centre of each sweep.
+# Declared here, next to the ablations, because it is the same kind of study-level fact and
+# because the notebook, the tables and the figures must all read one definition.
+CENTRAL_SETTINGS = {
+    "vanilla": "baseline", "fixed_scaling": "a0p500",
+    "learnable_scaling": "init_a0p500", "loss_regularization": "lam1e-03",
+    "controlled_fusion": "base", "adaptive_gating": "base",
 }
 
 
 def branch_off(impl_name, setting_tag):
-    """Quale ramo spegne questa ablazione, o ``None`` se il setting non e' un'ablazione."""
+    """Which branch this ablation switches off, or ``None`` if the setting is not one."""
     return ABLATION_SETTINGS.get((str(impl_name), str(setting_tag)))
 
 
@@ -523,27 +533,27 @@ def is_ablation(impl_name, setting_tag):
 
 
 def drop_ablations(df, where="", verbose=True):
-    """Toglie le ablazioni unimodali da una tabella per-run prima di aggregarla.
+    """Remove the unimodal ablations from a per-run table before aggregating it.
 
-    Da chiamare in ogni punto che fa `groupby("impl_name")`. Su ISIC sposta la media AUC di
-    `fixed_scaling` da 0.8974 a 0.9014 e la sua `lore_coverage` di famiglia da un valore che
-    contiene 0.000 e 1.000 a uno che non li contiene.
+    To be called at every point that does `groupby("impl_name")`. On ISIC it moves the AUC
+    mean of `fixed_scaling` from 0.8974 to 0.9014, and its family `lore_coverage` from a
+    value that contains 0.000 and 1.000 to one that does not.
     """
     if not len(df) or "impl_name" not in df.columns or "setting_tag" not in df.columns:
         return df
     keep = [not is_ablation(i, t) for i, t in zip(df["impl_name"], df["setting_tag"])]
     n = len(keep) - sum(keep)
     if n and verbose:
-        print(f"  [ablations] {where}: {n} run di endpoint unimodale escluse dall'aggregato")
+        print(f"  [ablations] {where}: {n} unimodal endpoint runs excluded from the aggregate")
     return df[keep]
 
 
 def _run_gains(run_dir, prefix="faithfulness_aligned_signed", modes=("abs",) + SIGNED_MODES_REPORT):
-    """Tutti i gain di una run, CON le convenzioni di segno gia' applicate.
+    """Every gain of a run, WITH the sign conventions already applied.
 
-    Mai dallo scalare del JSON: `faithfulness_tabular_del_gain` e' PRE-convenzione
-    (`negev` va negato, `target` firmato per campione prima della media). Si passa dagli
-    npz, che portano dentro anche le `labels` — quindi non serve validation_df.
+    Never from the JSON scalar: `faithfulness_tabular_del_gain` is PRE-convention (`negev`
+    must be negated, `target` signed per sample before the mean). It goes through the npz,
+    which carry the `labels` as well — so validation_df is not needed.
     """
     from . import xai_faithfulness as xf
     d = out_dir_for(run_dir, "shap_tab")
@@ -565,10 +575,10 @@ def _run_gains(run_dir, prefix="faithfulness_aligned_signed", modes=("abs",) + S
 
 
 def _lore_quality(run_dir):
-    """Qualita' LORE-SA di una run, con la scomposizione per classe.
+    """LORE-SA quality of a run, with the per-class breakdown.
 
-    `*_5050` = media delle due medie di classe. E' la colonna da citare quando il campione
-    non e' bilanciato: neutralizza la composizione senza buttare via campioni.
+    `*_5050` = mean of the two class means. It is the column to quote when the sample is
+    unbalanced: it neutralizes the composition without throwing samples away.
     """
     import glob as _glob
     import pandas as pd
@@ -593,17 +603,17 @@ def _lore_quality(run_dir):
 def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag="",
            out_dir=None, verbose=True, encoded_feature_names=None, lore_idx=None,
            shape_metrics=True):
-    """Tabelle + figure di confronto fra famiglie, dagli artefatti gia' su disco. Zero GPU.
+    """Between-family tables and figures, from the artifacts already on disk. Zero GPU.
 
-    `master`  il DataFrame di `master_results_rows.csv` (colonne impl_name, setting_tag,
+    `master`  the `master_results_rows.csv` DataFrame (columns impl_name, setting_tag,
               seed, run_id, run_dir).
-    `central` {impl_name: setting_tag} dei setting rappresentativi. **Serve**: il master
-              ha 45 righe di `fixed_scaling`, `a0p000` (degenere, tutti zeri) compresa, e
-              un `groupby("impl_name")` secco le mescola tutte nella media di famiglia.
-              None = si usano tutte le run, e viene stampato l'avviso.
-    `tag`     forza il suffisso dei file. Default: derivato dall'`n` dei dati di ciascun
-              kind (`_n144` per la fedelta', `_n48` per LORE), cosi' i due non possono
-              etichettarsi con l'n dell'altro.
+    `central` {impl_name: setting_tag} of the representative settings. **Needed**: the
+              master holds 45 `fixed_scaling` rows, `a0p000` (degenerate, all zeros)
+              included, and a plain `groupby("impl_name")` blends them all into the family
+              mean. None = every run is used, and the warning is printed.
+    `tag`     forces the file suffix. Default: derived from each kind's own `n` (`_n144` for
+              faithfulness, `_n48` for LORE), so the two cannot label themselves with the
+              other's n.
     """
     import pandas as pd
     import matplotlib.pyplot as plt
@@ -613,18 +623,18 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
     os.makedirs(out_dir, exist_ok=True)
 
     def _sfx(df):
-        """Suffisso DERIVATO dai dati, non dal chiamante.
+        """A suffix DERIVED from the data, not from the caller.
 
-        `shap_tab` e `lore_sa` girano su n diversi (144 e 48): un `tag` unico passato da
-        fuori ne etichetta uno dei due con l'n dell'altro, e il file sbagliato resta su
-        disco quando il prossimo giro scrive col nome giusto. Se l'n non e' unico fra le
-        run si torna al `tag` del chiamante, che almeno non mente su un valore singolo.
+        `shap_tab` and `lore_sa` run on different n (144 and 48): a single `tag` passed from
+        outside labels one of them with the other's n, and the wrong file stays on disk when
+        the next pass writes under the right name. If n is not unique across the runs it
+        falls back to the caller's `tag`, which at least does not lie about a single value.
         """
         if tag:
             return f"_{tag}"
         ns = sorted(set(int(v) for v in df["n"])) if len(df) else []
         return f"_n{ns[0]}" if len(ns) == 1 else ""
-    # il master porta i path della macchina su cui e' stato scritto: si riancora su art_path
+    # the master carries the paths of the machine that wrote it: re-anchor them on art_path
     rd = {r.run_id: run_dir_abs(r.run_dir, art_path) for _, r in master.iterrows()}
     written, out = [], {}
 
@@ -647,8 +657,8 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
             else:
                 sel = drop_ablations(faith, "faithfulness", verbose)
                 if verbose:
-                    print("  ⚠ central=None: la media di famiglia include tutti i setting "
-                          "dello sweep (le ablazioni unimodali sono comunque escluse)")
+                    print("  ⚠ central=None: the family mean includes every sweep setting "
+                          "(the unimodal ablations are excluded regardless)")
             col = f"target_del_q{int(Q_CLEAN * 100)}norm"
             order = sel.groupby("impl_name")[col].mean().sort_values().index.tolist()
             out["central"], out["order"] = sel, order
@@ -683,15 +693,15 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
                 rows.append(dict(impl_name=r.impl_name, setting_tag=r.setting_tag,
                                  seed=r.seed, run_id=r.run_id, **rec))
         lore = pd.DataFrame(rows)
-        # Le run LORE possono avere lo STESSO n ma campioni diversi (il 01/08 `vanilla` ne
-        # aveva tre a n=48, una sul prefisso dei 144 e due sul campione bilanciato). Se la
-        # prevalenza non e' unica, la media di famiglia mescola popolazioni diverse.
+        # LORE runs can share the SAME n over different samples (on 01/08 `vanilla` had
+        # three at n=48, one on the prefix of the 144 and two on the balanced sample). If the
+        # prevalence is not unique, the family mean blends different populations.
         if len(lore) and "pos_rate" in lore:
             for _f, _g in lore.groupby("impl_name"):
                 if _g.pos_rate.round(3).nunique() > 1 and verbose:
-                    print(f"  ⚠ {_f}: run LORE su campioni DIVERSI "
+                    print(f"  ⚠ {_f}: LORE runs on DIFFERENT samples "
                           f"(pos_rate {sorted(_g.pos_rate.round(3).unique())}) — "
-                          f"la media di famiglia mescola popolazioni, rifare le vecchie")
+                          f"the family mean blends populations, redo the old ones")
         out["lore"] = lore
         if len(lore):
             sfx = _sfx(lore)
@@ -707,24 +717,24 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
                     ("rule_len", "rule_len_5050", "rule_len")]):
                 x = np.arange(len(lo))
                 ax.bar(x - .2, lo[raw], .4, color="#b0b0b0",
-                       label=f"grezzo (pos_rate {lore.pos_rate.mean():.2f})")
-                ax.bar(x + .2, lo[bal], .4, color="#2b7bba", label="riponderato 50/50")
+                       label=f"raw (pos_rate {lore.pos_rate.mean():.2f})")
+                ax.bar(x + .2, lo[bal], .4, color="#2b7bba", label="reweighted 50/50")
                 ax.set_xticks(x)
                 ax.set_xticklabels([f.replace("_", "\n") for f in lo.index], fontsize=8)
                 ax.set_title(name); ax.legend(fontsize=8); ax.grid(axis="y", alpha=.25)
             unbal = abs(lore.pos_rate.mean() - .5) > .05
-            fig.suptitle("LORE-SA per famiglia" + (
-                f" — ⚠ campione SBILANCIATO ({int(lore.n_pos.mean())} pos / "
-                f"{int(lore.n_neg.mean())} neg): ordinamento si', livelli no" if unbal
-                else " — campione bilanciato"), y=1.0)
+            fig.suptitle("LORE-SA by family" + (
+                f" — ⚠ UNBALANCED sample ({int(lore.n_pos.mean())} pos / "
+                f"{int(lore.n_neg.mean())} neg): ordering yes, levels no" if unbal
+                else " — balanced sample"), y=1.0)
             _finalize_plot(out_dir, f"lore_sa_quality{sfx}.png")
             written.append(os.path.join(out_dir, f"lore_sa_quality{sfx}.png"))
 
-    # ---- metriche di FORMA che sono CROSS-RUN per natura --------------------------------
-    # Compattezza e rule compactness le scrivono i motori mentre calcolano (`ShapCallback`,
-    # `LoreSACallback`).  Queste due no, e non possono: la stabilita' confronta DUE run e
-    # l'accordo SHAP<->LORE ne incrocia due explainer.  Girano qui, in coda ai loop, che e'
-    # il primo momento in cui tutte le run esistono.
+    # ---- SHAPE metrics that are CROSS-RUN by nature -------------------------------------
+    # Compactness and rule compactness are written by the engines as they compute
+    # (`ShapCallback`, `LoreSACallback`). These two are not, and cannot be: stability
+    # compares TWO runs and the SHAP<->LORE agreement crosses two explainers. They run here,
+    # at the end of the loops, the first moment at which every run exists.
     if shape_metrics and encoded_feature_names is not None:
         from . import xai_metrics as xmet
         shape = xmet.collect(master, art_path,
@@ -742,7 +752,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         written.append(os.path.join(out_dir, "xai_summary_by_family.csv"))
 
     if verbose:
-        print(f"[report] {len(written)} file in {out_dir}")
+        print(f"[report] {len(written)} files in {out_dir}")
         for p in written:
             print("   ", os.path.basename(p))
     out["written"] = written
@@ -750,15 +760,15 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
 
 
 # --------------------------------------------------------------------------------------
-# Gli indici delle righe spiegate — UNA funzione, due spazi tenuti distinti
+# The indices of the explained rows — ONE function, two spaces kept apart
 # --------------------------------------------------------------------------------------
-# `explained_indices` e' la posizione DENTRO il campione (0..n-1), qualunque sia il
-# campione. `val_index` e' la posizione in `validation_df`. Hanno nomi simili, sono interi
-# della stessa taglia, e incrociarli non solleva: ha gia' prodotto tre difetti distinti.
-# Chi vuole gli indici li chiede QUI e riceve anche lo spazio in cui vivono.
+# `explained_indices` is the position INSIDE the sample (0..n-1), whatever the sample is.
+# `val_index` is the position in `validation_df`. The names are similar, they are integers
+# of the same size, and crossing them does not raise: it has already produced three distinct
+# defects. Whoever wants the indices asks HERE, and is told which space they live in.
 
 def _artifact_column(npz_or_df, key, dtype):
-    """Una colonna da un npz o da un CSV gia' letto, senza sapere quale dei due sia."""
+    """One column from an npz or an already-read CSV, without knowing which it is."""
     keys = (npz_or_df.files if hasattr(npz_or_df, "files")
             else list(getattr(npz_or_df, "columns", [])))
     if key not in keys:
@@ -767,13 +777,13 @@ def _artifact_column(npz_or_df, key, dtype):
 
 
 def read_explained_index(npz_or_df, allow_prefix=True):
-    """``(indici in validation_df, provenienza)`` da un npz o da un CSV per campione.
+    """``(indices into validation_df, provenance)`` from an npz or a per-sample CSV.
 
-    ``provenienza`` e' ``"val_index"`` quando l'artefatto lo registra, e
-    ``"prefix"`` quando si ricade su ``explained_indices``: quei valori coincidono con le
-    posizioni di validation SOLO sugli artefatti storici, dove il campione era il prefisso.
-    Restituisce ``(None, "unknown")`` se l'artefatto non dice quali righe ha spiegato —
-    "non lo so" non e' "non corrisponde", e chi chiama decide.
+    ``provenance`` is ``"val_index"`` when the artifact records it, and ``"prefix"`` when it
+    falls back on ``explained_indices``: those values coincide with validation positions
+    ONLY on the historical artifacts, where the sample was the prefix. Returns
+    ``(None, "unknown")`` when the artifact does not say which rows it explained — "I do not
+    know" is not "does not match", and the caller decides.
     """
     vi = _artifact_column(npz_or_df, "val_index", int)
     if vi is not None:
@@ -786,45 +796,45 @@ def read_explained_index(npz_or_df, allow_prefix=True):
 
 
 def read_explained_ids(npz_or_df):
-    """Gli id di riga spiegati da un artefatto, o ``None`` se non li registra.
+    """The row ids an artifact explained, or ``None`` when it does not record them.
 
-    E' l'identita' che sopravvive a una ricostruzione del fold: gli indici posizionali no.
-    ``isic_id`` e' la chiave degli artefatti scritti prima che l'identita' avesse un nome
-    indipendente dal dataset; si legge ancora, non si scrive piu'.
+    This is the identity that survives a rebuild of the fold; positional indices do not.
+    ``isic_id`` is the key of artifacts written before row identity had a dataset-independent
+    name; it is still read, never written.
     """
     ids = _artifact_column(npz_or_df, ROW_ID_KEY, str)
     return ids if ids is not None else _artifact_column(npz_or_df, "isic_id", str)
 
 
 # --------------------------------------------------------------------------------------
-# L'identita' di una riga — una pipeline, dataset qualunque
+# Row identity — one pipeline, any dataset
 # --------------------------------------------------------------------------------------
-# `ID_COL` e' la colonna che identifica una riga nel dataframe di validation, e cambia con
-# il dataset: `isic_id` su ISIC-2024, `image_id` su BRSET. Si dichiara UNA volta per
-# sessione, accanto agli altri parametri; da li' in poi nessuna funzione la nomina.
+# `ID_COL` is the column identifying a row in the validation dataframe, and it changes with
+# the dataset: `isic_id` on ISIC-2024, `image_id` on BRSET. It is declared ONCE per session,
+# next to the other parameters; from there on no function names it.
 #
-# `ROW_ID_KEY` invece NON cambia mai: e' il nome con cui l'identita' viene scritta dentro
-# gli artefatti, cosi' un npz e' leggibile senza sapere da quale dataset viene.
+# `ROW_ID_KEY` never changes: it is the name under which identity is written inside the
+# artifacts, so an npz is readable without knowing which dataset it comes from.
 ID_COL = "isic_id"
 ROW_ID_KEY = "row_id"
 
-# Il validation ATTIVO in questa sessione: la sola sorgente di identita' in scrittura.
-# Lo riempiono `adopt` e `xai_faithfulness.configure`, cioe' i due punti in cui una
-# sessione dichiara su quale eval set sta lavorando; l'ultimo dichiarato vince.
+# The ACTIVE validation of this session: the only source of identity when writing. It is
+# filled by `adopt` and `xai_faithfulness.configure`, the two points at which a session
+# declares which eval set it works on; the last declaration wins.
 VALIDATION_ROW_IDS = None
 
 
 def row_ids(df):
-    """La colonna di identita' di un dataframe, qualunque dataset sia."""
+    """The identity column of a dataframe, whatever the dataset is."""
     if ID_COL not in getattr(df, "columns", []):
         raise KeyError(
-            f"colonna di identita' {ID_COL!r} assente: le colonne sono {list(df.columns)[:8]}. "
-            f"Dichiara xs.ID_COL accanto agli altri parametri della sessione.")
+            f"identity column {ID_COL!r} missing: the columns are {list(df.columns)[:8]}. "
+            f"Declare xs.ID_COL next to the other session parameters.")
     return df[ID_COL].to_numpy()
 
 
 def register_validation_ids(validation_df):
-    """Dichiara quale validation e' attivo. Da qui gli artefatti prendono l'identita'."""
+    """Declare which validation is active. Artifacts take their identity from here."""
     global VALIDATION_ROW_IDS
     VALIDATION_ROW_IDS = (None if validation_df is None
                           else np.asarray(row_ids(validation_df), str))
@@ -832,29 +842,28 @@ def register_validation_ids(validation_df):
 
 
 def stamp_row_ids(val_index):
-    """``{ROW_ID_KEY: ...}`` da scrivere in un artefatto, ``{}`` se nessun validation e' noto.
+    """``{ROW_ID_KEY: ...}`` to write into an artifact, ``{}`` when no validation is known.
 
-    Unico punto che traduce posizioni -> identita' in scrittura. Un indice fuori range
-    solleva: significa che il campione e il validation registrato sono di due fold diversi,
-    ed e' proprio il caso in cui gli id scritti sarebbero plausibili e sbagliati.
+    The single point translating positions -> identity when writing. An out-of-range index
+    raises: it means the sample and the registered validation come from two different folds,
+    which is exactly the case where the written ids would be plausible and wrong.
     """
     if VALIDATION_ROW_IDS is None or val_index is None:
         return {}
     idx = np.asarray(val_index, int)
     if idx.size and int(idx.max()) >= len(VALIDATION_ROW_IDS):
         raise RuntimeError(
-            f"stamp_row_ids: indice {int(idx.max())} su un validation di "
-            f"{len(VALIDATION_ROW_IDS)} righe. Il campione non appartiene al validation "
-            f"registrato: rigeneralo, oppure ri-dichiara il contesto.")
+            f"stamp_row_ids: index {int(idx.max())} over a validation of "
+            f"{len(VALIDATION_ROW_IDS)} rows. The sample does not belong to the registered "
+            f"validation: regenerate it, or re-declare the context.")
     return {ROW_ID_KEY: VALIDATION_ROW_IDS[idx]}
 
 
 def index_for_row_ids(ids, validation_df):
-    """Posizioni in `validation_df` di questi id, con i due modi di sbagliare chiusi.
+    """Positions in `validation_df` of these ids, with both ways of being wrong closed.
 
-    Il validation e' ricampionato: 291 righe sono duplicati, quindi id -> posizione non e'
-    iniettivo. Un id duplicato o assente solleva invece di risolversi in silenzio nella
-    prima occorrenza.
+    Validation is resampled: 291 rows are duplicates, so id -> position is not injective. A
+    duplicated or missing id raises instead of silently resolving to the first occurrence.
     """
     col = row_ids(validation_df)
     pos = {}
@@ -865,13 +874,13 @@ def index_for_row_ids(ids, validation_df):
     missing = [v for v in want if v not in pos]
     ambiguous = [v for v in want if v in dup]
     if missing or ambiguous:
-        raise KeyError(f"id assenti dal validation: {missing[:5]} | "
-                       f"duplicati (posizione non definita): {ambiguous[:5]}")
+        raise KeyError(f"ids missing from validation: {missing[:5]} | "
+                       f"duplicated (position undefined): {ambiguous[:5]}")
     return np.asarray([pos[v] for v in want], int)
 
 
-# Dove ciascun motore lascia l'artefatto che dichiara le righe spiegate, dentro
-# `out_dir_for(run_dir, kind)`. Si legge sempre il piu' recente.
+# Where each engine leaves the artifact declaring which rows it explained, inside
+# `out_dir_for(run_dir, kind)`. The most recent one is always the one read.
 SUBSET_ARTIFACT_GLOB = {
     "lore_sa": os.path.join("epoch*", "lore_sa_persample_*.csv"),
     "shap_tab": os.path.join("epoch_*", "shap_arrays_epoch_*.npz"),
@@ -880,10 +889,11 @@ SUBSET_ARTIFACT_GLOB = {
 
 
 def read_sample_identity(run_dir, kind):
-    """``(indici, id di riga)`` dell'artefatto piu' recente di `kind`; ``None`` dove manca.
+    """``(indices, row ids)`` of the most recent `kind` artifact; ``None`` where absent.
 
-    `allow_prefix=False`: `explained_indices` vive in un altro spazio (posizione DENTRO il
-    campione), e confrontarlo con indici di validation dava sempre False su artefatti sani.
+    `allow_prefix=False`: `explained_indices` lives in another space (position INSIDE the
+    sample), and comparing it with validation indices always returned False on healthy
+    artifacts.
     """
     import glob as _glob
     pat = SUBSET_ARTIFACT_GLOB.get(kind)
@@ -901,22 +911,22 @@ def read_sample_identity(run_dir, kind):
 
 
 def sample_matches(run_dir, kind, expected_idx):
-    """Gli artefatti di `kind` sono stati calcolati SU QUESTI campioni?  (True/False/None)
+    """Were the `kind` artifacts computed ON THESE samples?  (True/False/None)
 
-    Il confronto passa per gli id di riga quando l'artefatto li porta e il validation attivo
-    e' registrato: due fold ricostruiti in ordine diverso hanno le STESSE posizioni e id
-    diversi, quindi solo gli id sanno distinguerli.  Senza id da una delle due parti si
-    ricade sulle posizioni, che e' quanto si puo' dire degli artefatti piu' vecchi.
+    The comparison goes through row ids when the artifact carries them and the active
+    validation is registered: two folds rebuilt in a different order have the SAME positions
+    and different ids, so only ids can tell them apart. Without ids on either side it falls
+    back to positions, which is all that can be said about the older artifacts.
 
-    L'impronta nella stampigliatura identifica il campione-PADRE (le 144 lesioni), non il
-    sottoinsieme che un motore ha davvero spiegato.  LORE ne spiega 48: il 31/07 erano i
-    primi 48 dei 144 ordinati (35 pos / 13 neg), dal 01/08 sono 24+24 espliciti.  Stessa
-    impronta, due campioni diversi — quindi "gia' fatto" da solo non basta, o il rifacimento
-    salterebbe proprio le run che vanno rifatte.
+    The fingerprint in the stamp identifies the PARENT sample (the 144 lesions), not the
+    subset an engine actually explained. LORE explains 48 of them: on 31/07 they were the
+    first 48 of the sorted 144 (35 pos / 13 neg), since 01/08 they are an explicit 24+24.
+    Same fingerprint, two different samples — so "already done" alone is not enough, or the
+    redo would skip exactly the runs that need redoing.
 
-    Ritorna ``None`` quando l'artefatto non registra quali righe ha spiegato (tutti quelli
-    prodotti prima che `val_index` esistesse): "non lo so" e' un'informazione diversa da
-    "non corrisponde", e chi chiama decide se rifare.
+    Returns ``None`` when the artifact does not record which rows it explained (every one
+    produced before `val_index` existed): "I do not know" is different information from
+    "does not match", and the caller decides whether to redo.
     """
     got, got_ids = read_sample_identity(run_dir, kind)
     exp_ids = stamp_row_ids(expected_idx).get(ROW_ID_KEY)
@@ -930,11 +940,11 @@ def sample_matches(run_dir, kind, expected_idx):
 
 
 def resume_verified(run_dirs, kind, fp, expected_idx, task=None):
-    """Come `resume_report`, ma "fatto" significa **fatto su QUESTO campione**.
+    """Like `resume_report`, but "done" means **done on THIS sample**.
 
-    Ritorna ``(todo, done, da_rifare)``: le run stampigliate ma su campioni diversi (o su
-    campioni non registrati) finiscono in `da_rifare`, non in `done`.  E' la differenza fra
-    "non rifare cio' che e' fatto" e "non rifare niente".
+    Returns ``(todo, done, redo)``: runs that are stamped but on different samples (or on
+    unrecorded ones) land in `redo`, not in `done`. It is the difference between "do not
+    redo what is done" and "do not redo anything".
     """
     items = list(run_dirs.items() if hasattr(run_dirs, "items") else run_dirs)
     todo, done, redo = [], [], []
