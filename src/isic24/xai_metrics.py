@@ -484,11 +484,13 @@ def stability_table(master, art_path, encoded_feature_names, k=TOP_K):
                                      tag_a=ra.setting_tag, tag_b=rb.setting_tag,
                                      param_a=ra.param, param_b=rb.param,
                                      stability_at_k=_jaccard_runs(A, B), k=k))
-        # (b) NULL: same setting, different seeds. The metric here is TABULAR SHAP, so only
-        # the setting switching that branch off drops out: with the branch off the top-k is
-        # empty and the Jaccard would be forced, not measured.
+        # (b) NULL: same setting, different seeds. Ablations drop out here too, and for the
+        # same reason as in (a): an effect and its null have to be measured on the same
+        # population, or their difference is partly a difference of population. Excluding
+        # only the branch-off setting left the tabular-only end in the null and out of the
+        # effect — 0.005 on ISIC, and no reason to expect it to stay that small elsewhere.
         for tag, gt in grp.groupby("setting_tag"):
-            if xs.branch_off(impl, tag) == "tabular":
+            if xs.is_ablation(impl, tag):
                 continue
             gt = gt.sort_values("seed")
             for (_, ra), (_, rb) in zip(gt.iloc[:-1].iterrows(), gt.iloc[1:].iterrows()):

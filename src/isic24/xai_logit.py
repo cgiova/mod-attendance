@@ -270,6 +270,20 @@ CLASS_COLS = ["image_share_pos", "image_share_neg", "image_target_aligned_pos",
               "tabular_target_aligned_neg"]
 
 
+def family_table(by_run):
+    """One row per family: the shares with their between-seed sd, then the class split.
+
+    The two halves are aggregated differently — `mean`+`std` against `mean` alone — so the
+    first arrives with two column levels and the second with one. They are flattened here
+    before being put side by side: joining them as they come raises, which is why the class
+    columns existed in the code and never reached the artifact.
+    """
+    share = by_run.groupby("impl_name")[SHARE_COLS].agg(["mean", "std"]).round(4)
+    share.columns = [f"{c}__{stat}" for c, stat in share.columns]
+    cls = by_run.groupby("impl_name")[CLASS_COLS].mean().round(4)
+    return share.join(cls).reset_index()
+
+
 def decompose_study(master, art_path, subset_idx=None, central=None, overwrite=False,
                     out_dir=None, verbose=True):
     """Decompose every run in ``master`` (optionally restricted to the central settings).
@@ -304,8 +318,7 @@ def decompose_study(master, art_path, subset_idx=None, central=None, overwrite=F
                   f"delta {row['recon_max_abs_delta']:.1e}")
 
     by_run = pd.DataFrame(rows)
-    by_family = (by_run.groupby("impl_name")[SHARE_COLS].agg(["mean", "std"]).round(4)
-                 .join(by_run.groupby("impl_name")[CLASS_COLS].mean().round(4)).reset_index())
+    by_family = family_table(by_run)
 
     out_dir = out_dir or os.path.join(art_path, "runs", xs.AGGREGATE_DIRNAME)
     os.makedirs(out_dir, exist_ok=True)

@@ -571,6 +571,18 @@ try:
     _okd, _msgd = raises(lambda: xlog.assert_branch_order(_md, xlog.head_split(_md), _xb),
                          AssertionError)
     check("E. dead image branch (alpha=1): RAISES instead of measuring zero", _okd, _msgd)
+
+    # The class split is the point of the decomposition: the aggregate must CARRY it, and
+    # the two halves aggregate differently, so putting them side by side used to raise.
+    _bt = pd.DataFrame([dict(impl_name="vanilla", seed=s,
+                             **{c: float(i) for i, c in enumerate(xlog.SHARE_COLS)},
+                             **{c: float(i) for i, c in enumerate(xlog.CLASS_COLS)})
+                        for s in (47, 53)])
+    _ft = xlog.family_table(_bt)
+    check("F. the family table carries the class split beside the shares",
+          all(c in _ft.columns for c in xlog.CLASS_COLS)
+          and all(f"{c}__mean" in _ft.columns for c in xlog.SHARE_COLS) and len(_ft) == 1,
+          f"{len(_ft.columns)} columns, {len(_ft)} row")
 except Exception as _e:                                            # noqa: BLE001
     print(f"  (keras unavailable: section skipped — {type(_e).__name__}: {_e})")
 
@@ -934,6 +946,61 @@ _master2 = _master.copy()
 make_cams("vanilla_47", _TL, fp="OTHER")
 ok, msg = raises(lambda: _xm2.cam_overlap_table(_master2, TMP, central=_central))
 check("D. heatmaps from a different sample -> RAISES", ok, msg)
+
+# =============================================================================
+section("23. One population per run — the engines must explain the same rows")
+# Four engines write into four folders and nothing forced them to agree. The invariant is
+# NESTING, not equality: LORE explains a declared subset by design, while a population that
+# overlaps the reference only in part is two samples wearing one name.
+from isic24 import xai_subset as _xs23                            # noqa: E402
+
+
+def make_pop(tag, shap_idx, lore_idx=None, faith_idx=None, faith_n=None, root=TMP):
+    """A run dir carrying one artifact per engine, each on the rows it is given."""
+    run = os.path.join(root, "runs", "pop", tag)
+    d = os.path.join(run, "xai", "shap_tab", "epoch_001")
+    os.makedirs(d, exist_ok=True)
+    np.savez(os.path.join(d, "shap_arrays_epoch_001.npz"),
+             val_index=np.asarray(shap_idx, int))
+    if lore_idx is not None:
+        d = os.path.join(run, "xai", "lore_sa", "epoch001")
+        os.makedirs(d, exist_ok=True)
+        pd.DataFrame({"val_index": np.asarray(lore_idx, int)}).to_csv(
+            os.path.join(d, "lore_sa_persample_001.csv"), index=False)
+    if faith_idx is not None or faith_n is not None:
+        d = os.path.join(run, "xai", "faithfulness")
+        os.makedirs(d, exist_ok=True)
+        kw = ({"val_index": np.asarray(faith_idx, int)} if faith_idx is not None
+              else {"labels": np.zeros(faith_n, np.float32)})
+        np.savez(os.path.join(d, "faithfulness_curves.npz"), **kw)
+    return run
+
+
+_clean = make_pop("clean", shap_idx=range(12), lore_idx=[1, 3, 5], faith_idx=range(12))
+_pops = _xs23.sample_populations(_clean)
+check("A. every engine's population is read, faithfulness included",
+      set(_pops.kind) == {"shap_tab", "lore_sa", "faithfulness"}
+      and sorted(_pops.n) == [3, 12, 12], f"{dict(zip(_pops.kind, _pops.n))}")
+check("B. a declared subset is nested, not a mismatch",
+      _xs23.assert_nested_samples(_clean) is not None, "LORE 3 of 12 passes")
+
+_part = make_pop("partial", shap_idx=range(12), faith_idx=range(8, 20))
+ok, msg = raises(lambda: _xs23.assert_nested_samples(_part))
+check("C. a partly-overlapping population -> RAISES", ok and "outside" in msg, msg)
+
+_blind = make_pop("blind", shap_idx=range(12), faith_n=8)
+ok, msg = raises(lambda: _xs23.assert_nested_samples(_blind))
+check("D. a population that does not record its rows -> RAISES", ok and "unknown" in msg, msg)
+check("E. and it can be audited instead of raising",
+      _xs23.assert_nested_samples(_blind, raise_on_unknown=False) is not None,
+      "raise_on_unknown=False reports, which is what immutable artifacts need")
+
+_m23 = pd.DataFrame([dict(impl_name="vanilla", setting_tag="base", seed=s,
+                          run_dir=os.path.join("runs", "pop", t))
+                     for s, t in ((47, "clean"), (53, "partial"))])
+_t23, _ok23 = _xs23.sample_audit(_m23, TMP, verbose=False)
+check("F. the audit reports across runs without raising",
+      _ok23 is False and len(_t23) == 5, f"ok={_ok23}, rows={len(_t23)}")
 
 # =============================================================================
 shutil.rmtree(TMP, ignore_errors=True)

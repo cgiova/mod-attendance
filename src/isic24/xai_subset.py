@@ -887,6 +887,18 @@ SUBSET_ARTIFACT_GLOB = {
     "gradcam_img": "gradcam_arrays*_epoch_*.npz",
 }
 
+# The faithfulness curves explain rows too, but they live outside `SUBSET_KINDS`: that tuple
+# drives the DONE stamps, whose file names must not move. So the populations are read from a
+# map of their own, which extends the one above instead of replacing it.
+POPULATION_KINDS = SUBSET_KINDS + ("faithfulness",)
+_POPULATION_GLOB = {**SUBSET_ARTIFACT_GLOB, "faithfulness": "faithfulness_curves.npz"}
+
+
+def _population_dir(run_dir, kind):
+    if kind == "faithfulness":
+        return os.path.join(run_dir, "xai", "faithfulness")
+    return out_dir_for(run_dir, kind)
+
 
 def read_sample_identity(run_dir, kind):
     """``(indices, row ids)`` of the most recent `kind` artifact; ``None`` where absent.
@@ -896,10 +908,10 @@ def read_sample_identity(run_dir, kind):
     artifacts.
     """
     import glob as _glob
-    pat = SUBSET_ARTIFACT_GLOB.get(kind)
+    pat = _POPULATION_GLOB.get(kind)
     if pat is None:
         return None, None
-    hits = sorted(_glob.glob(os.path.join(out_dir_for(run_dir, kind), pat)))
+    hits = sorted(_glob.glob(os.path.join(_population_dir(run_dir, kind), pat)))
     if not hits:
         return None, None
     if hits[-1].endswith(".csv"):
@@ -908,6 +920,116 @@ def read_sample_identity(run_dir, kind):
         return read_explained_index(art, allow_prefix=False)[0], read_explained_ids(art)
     with np.load(hits[-1]) as z:
         return read_explained_index(z, allow_prefix=False)[0], read_explained_ids(z)
+
+
+def _population_size(run_dir, kind):
+    """How many rows the `kind` artifact explains, even when it does not say WHICH."""
+    import glob as _glob
+    pat = _POPULATION_GLOB.get(kind)
+    hits = sorted(_glob.glob(os.path.join(_population_dir(run_dir, kind), pat or "")))
+    if not hits:
+        return None
+    if hits[-1].endswith(".csv"):
+        import pandas as pd
+        return int(len(pd.read_csv(hits[-1])))
+    with np.load(hits[-1]) as z:
+        for key in ("labels", "val_index", ROW_ID_KEY):
+            if key in z.files:
+                return int(np.asarray(z[key]).ravel().size)
+    return None
+
+
+def sample_populations(run_dir, kinds=POPULATION_KINDS):
+    """One row per explanation artifact of a run: WHICH rows it explains, and how many.
+
+    The four engines write into four places and nothing forced them to agree, so a run can
+    carry a Grad-CAM on one sample and a faithfulness curve on another. That is not
+    hypothetical: the canonical faithfulness curves predate `adopt()` and sit on the first
+    `FAITH_N_SAMPLES` validation rows, which share 41 rows with the 144-lesion sample the
+    other engines use. Nothing said so, because no artifact was ever read side by side.
+
+    ``index`` is ``None`` for artifacts written before `val_index` existed: "unknown" is not
+    "matches", and `assert_nested_samples` treats it as unknown.
+    """
+    import pandas as pd
+    rows = []
+    for kind in kinds:
+        idx, ids = read_sample_identity(run_dir, kind)
+        n = _population_size(run_dir, kind)
+        if idx is None and n is None:
+            continue
+        rows.append(dict(kind=kind, n=len(idx) if idx is not None else n,
+                         index=None if idx is None else np.sort(np.asarray(idx, int)),
+                         has_ids=ids is not None))
+    return pd.DataFrame(rows, columns=["kind", "n", "index", "has_ids"])
+
+
+def assert_nested_samples(run_dir, kinds=POPULATION_KINDS, raise_on_unknown=True):
+    """Every artifact of a run must explain a SUBSET of the largest population.
+
+    Nesting, not equality: LORE explains 48 of the 144 lesions by design, and that is
+    legitimate. What is not legitimate is a population that overlaps the reference only in
+    part — two samples wearing one name, which is how a class split ends up computed on rows
+    the rest of the study never explains.
+
+    An artifact that does not record which rows it explained cannot be shown to be nested.
+    With ``raise_on_unknown=False`` it is reported instead of raising, which is the only way
+    to audit artifacts produced before `val_index` existed.
+    """
+    pops = sample_populations(run_dir, kinds)
+    if pops.empty:
+        return pops
+    ref = pops.loc[pops["n"].idxmax()]
+    problems, unknown = [], []
+    for _, r in pops.iterrows():
+        if r["index"] is None or ref["index"] is None:
+            if r["n"] != ref["n"]:
+                unknown.append(f"{r['kind']}: n={r['n']} vs {ref['n']}, rows unknown"
+                               f" — it predates `val_index`, so nesting cannot be shown")
+            continue
+        extra = np.setdiff1d(r["index"], ref["index"])
+        if extra.size:
+            shared = len(np.intersect1d(r["index"], ref["index"]))
+            problems.append(f"{r['kind']}: {extra.size} rows outside {ref['kind']}"
+                            f" — {r['n']} explained, {shared} shared")
+    bad = problems + (unknown if raise_on_unknown else [])
+    if bad:
+        raise RuntimeError(f"[SAMPLE] not one population — {bad[0]}\n  "
+                           + "\n  ".join(bad[1:] + [f"reference: {ref['kind']} n={ref['n']}",
+                                                    f"run_dir={run_dir}"]))
+    return pops
+
+
+def sample_audit(master, art_path, kinds=POPULATION_KINDS, verbose=True):
+    """`sample_populations` over every run, plus the verdict — the audit form of the guard.
+
+    Returns ``(table, ok)``. It reports instead of raising because the canonical artifacts
+    are immutable: the mismatch they carry is a fact to state in the report, not a failure
+    to fix in place. On a dataset explained in one session it is expected to come back clean.
+    """
+    import pandas as pd
+    rows, failures = [], {}
+    for _, r in master.iterrows():
+        d = _paths.run_dir_abs(r["run_dir"], art_path)
+        try:
+            assert_nested_samples(d, kinds)
+        except RuntimeError as e:
+            failures[str(e).splitlines()[0]] = failures.get(str(e).splitlines()[0], 0) + 1
+        for _, p in sample_populations(d, kinds).iterrows():
+            rows.append(dict(impl_name=r["impl_name"], setting_tag=r["setting_tag"],
+                             seed=r["seed"], kind=p["kind"], n=p["n"],
+                             knows_rows=p["index"] is not None))
+    t = pd.DataFrame(rows)
+    ok = not failures
+    if verbose:
+        if not t.empty:
+            print(t.groupby("kind").agg(runs=("n", "size"), n_min=("n", "min"), n_max=("n", "max"),
+                                        knows_rows=("knows_rows", "sum")).to_string())
+        for msg, n in sorted(failures.items(), key=lambda kv: -kv[1]):
+            print(f"  {n:>4} runs  {msg}")
+        print(f"\n[SAMPLE AUDIT] every population nested in the sample: "
+              f"{'PASS' if ok else 'FAIL'}")
+    return t, ok
 
 
 def sample_matches(run_dir, kind, expected_idx):
