@@ -121,6 +121,8 @@ def unique_lesion_subset(ids, labels, n=None, seed=0, balance="pool"):
         equal cost; the absolute level is no longer the population's, but stays comparable
         between strategies because the sample is the same for all of them;
       * ``"all"``   -- every distinct lesion, no sampling (``n`` ignored).
+    ``n=None`` means the largest sample this split allows: every distinct lesion for
+    ``"pool"``, twice the smaller class for ``"equal"``.
 
     Raises when ``n`` is not attainable, saying what the maximum is: the worst way to fail
     here would be to silently return fewer positives than asked for.
@@ -141,8 +143,9 @@ def unique_lesion_subset(ids, labels, n=None, seed=0, balance="pool"):
     if balance == "all":
         return rep, {"balance": "all", "n": len(rep), "per_class": avail,
                      "n_unique_available": {int(c): v for c, v in avail.items()}}
-    if n is None:
-        raise ValueError("n is required unless balance == 'all'")
+    
+    if n is None:               # the largest sample this split allows, given the balance
+        n = len(rep) if balance == "pool" else min(avail.values()) * len(classes)
     n = int(n)
 
     if balance == "equal":
