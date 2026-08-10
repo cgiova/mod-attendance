@@ -52,3 +52,4 @@ Thumbs.db
 /src/isic24/colab_bootstrap.sh
 /.claude/
 /ISIC24_STATIC_AUDIT.md
+.vscode/settings.json
