@@ -313,110 +313,86 @@ finally:
     xf.ACTIVE_SUBSET_FINGERPRINT, xf.FAITH_SUBSET_IDX = _pf, _pi
 
 # ======================================================================= 11 ===
-section("11. SPLIT IDENTITY — is today's validation the one the June checkpoints saw?")
-# The question of PART 0: are the 1091 rows we measure on really the ones the 110 checkpoints
-# were held out from? The bridge to June is the `labels` vector (128 samples) inside the
-# `xai/faithfulness/faithfulness_curves.npz`, written during the June training. `validation_ds`
-# is built with shuffle=False, so those 128 are exactly `validation_df.head(128)`: comparable
-# with a regeneration made today.
+section("11. VALIDATION IDENTITY — the frame every run is held out from, and its order")
+# Rewritten 2026-08-11. Until TR-06 this section asked whether today's validation was the one
+# the June checkpoints saw, bridged by the `labels` vector inside their faithfulness npz.
+# TR-03 (split before resample) and TR-06 (fold 0 keeps every positive, downsamples negatives,
+# upsamples nothing) changed that frame ON PURPOSE, and a 130-wide FeatureSpace means no June
+# checkpoint loads against it: those four cases had to fail, and standing red teaches its
+# readers to ignore red.
 #
-# Case D is what makes the test falsifiable: a PERTURBED split must NOT match. Without it, a
-# comparison that passes by construction would prove nothing.
-import glob as _glob                                              # noqa: E402
-import random as _random                                          # noqa: E402
+# The question that can still go wrong is this one: does the pipeline rebuild, row for row and
+# IN ORDER, the frame frozen in `validation_snapshot.json`?  Order is part of the identity
+# because every `val_index` in an XAI artifact is a position into this frame.
+import json as _js11                                              # noqa: E402
 
-_SEED, _NEG, _POS = 49, 0.01, 5.0
-_PARQ = os.path.join(BASE, "data", "isic24", "enhanced",
-                     "enhanced_train_metadata_clean.parquet")
-_june = sorted(_glob.glob(os.path.join(
-    ART, "runs", "*", "*", "seed_*", "*", "xai", "faithfulness", "faithfulness_curves.npz")))
+_SEED11, _VAL_NEG11 = 49, 0.01
+_PARQ11 = os.path.join(BASE, "data", "isic24", "enhanced",
+                       "enhanced_train_metadata_clean.parquet")
+_SNAP11 = os.path.join(ART, "validation_snapshot.json")
+_IMPUTED_NUM11 = ["age_approx", "size_age_interaction", "normalized_lesion_size"]
 
 
-def _regen_validation(rng_offset=0, shuffle_rs=None):
-    """Replica of cells 1/4/6/9 of the training notebook, on CPU and without keras.
-
-    `keras.utils.set_random_seed(49)` seeds numpy's global RNG. The historical shuffle was
-    `.sample(frac=1.0)` WITHOUT random_state, so it consumed that very RNG: `rng_offset`
-    simulates the global no longer being in its initial state -- for instance after
-    `run_experiment` has called `set_random_seed(run_seed)`.
-
-    `shuffle_rs=_SEED` is the version fixed in the notebook on 04/08, which must give the SAME
-    split **and** survive a dirty global RNG.
-    """
+def _regen11():
+    """Replica of @@SPLIT@@ and @@RESAMPLE@@ on CPU and without keras: the patient-grouped fold
+    is taken on the NATURAL frame, then fold 0 keeps every positive and downsamples negatives.
+    Returns (whole frame, natural training fold, resampled evaluation arm)."""
     from sklearn.model_selection import StratifiedGroupKFold
-    _random.seed(_SEED)
-    np.random.seed(_SEED)
-    for _ in range(rng_offset):
-        np.random.random()
-    d = pd.read_parquet(_PARQ).ffill()
-    maj = d.query("target==0").sample(frac=_NEG, random_state=_SEED)
-    mino = d.query("target==1").sample(frac=_POS, replace=True, random_state=_SEED)
-    d = pd.concat([maj, mino], axis=0)
-    d = (d.sample(frac=1.0) if shuffle_rs is None
-         else d.sample(frac=1.0, random_state=shuffle_rs)).reset_index(drop=True)
+    d = pd.read_parquet(_PARQ11).reset_index(drop=True)
     d["fold"] = -1
-    sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=_SEED)
+    sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=_SEED11)
     for i, (_tr, _va) in enumerate(sgkf.split(d, y=d.target, groups=d.patient_id)):
         d.loc[_va, "fold"] = int(i)
-    return d.query("fold!=0"), d.query("fold==0")
+    tr = d.query("fold != 0").copy()
+    va = d.query("fold == 0").copy()
+    va = pd.concat([va.query("target == 0").sample(frac=_VAL_NEG11, random_state=_SEED11),
+                    va.query("target == 1")], axis=0).sort_index().reset_index(drop=True)
+    return d, tr, va
 
 
-if not (os.path.exists(_PARQ) and _june):
-    print("  (dataset or June npz unavailable: section skipped)")
+if not os.path.exists(_PARQ11):
+    print("  (dataset unavailable: section skipped)")
 else:
-    _lab_june = np.load(_june[0])["labels"].astype(np.float32)
+    _all11, _tr11, _va11 = _regen11()
 
-    # every June run must share ONE label vector: had the split changed midway between the
-    # training sessions, the 110 checkpoints would not be paired.
-    _sigs = {np.asarray(np.load(f)["labels"], dtype=np.float32).tobytes() for f in _june}
-    check("A. a single `labels` vector across every June npz", len(_sigs) == 1,
-          f"{len(_sigs)} distinct over {len(_june)} npz")
+    check("A. the evaluation arm is TR-06's: 791 rows, 721 + 70, prevalence 0.0885",
+          (len(_va11), int((_va11.target == 0).sum()), int(_va11.target.sum())) == (791, 721, 70)
+          and round(float(_va11.target.mean()), 4) == 0.0885,
+          f"{len(_va11)} rows, {int(_va11.target.sum())} positive, "
+          f"prevalence {float(_va11.target.mean()):.4f}")
 
-    _tr, _va = _regen_validation()
-    check("B. the regeneration gives 4360/1091", (len(_tr), len(_va)) == (4360, 1091),
-          f"train={len(_tr)} val={len(_va)}")
+    check("B. nothing is upsampled on the evaluation arm: every row is a distinct lesion",
+          not _va11.isic_id.duplicated().any(),
+          f"{_va11.isic_id.nunique()} distinct over {len(_va11)} rows")
 
-    _lab_now = _va.target.to_numpy()[:128].astype(np.float32)
-    check("C. 128-row prefix: today's labels == June's labels",
-          np.array_equal(_lab_now, _lab_june),
-          f"match {float((_lab_now == _lab_june).mean()):.3f}, n_pos {int(_lab_june.sum())}")
+    check("C. no lesion and no patient crosses the split",
+          not (set(_tr11.isic_id) & set(_va11.isic_id))
+          and not (set(_tr11.patient_id) & set(_va11.patient_id)),
+          f"lesions {len(set(_tr11.isic_id) & set(_va11.isic_id))}, "
+          f"patients {len(set(_tr11.patient_id) & set(_va11.patient_id))}")
 
-    # the case that must FAIL: a perturbed split -> the comparison must notice
-    _va_bad = _regen_validation(rng_offset=1)[1]
-    _lab_bad = _va_bad.target.to_numpy()[:128].astype(np.float32)
-    check("D. perturbed split -> the comparison does NOT match (the test can fail)",
-          not np.array_equal(_lab_bad, _lab_june),
-          f"match {float((_lab_bad == _lab_june).mean()):.3f}")
+    _live11 = [str(v) for v in _va11.isic_id]
+    if not os.path.exists(_SNAP11):
+        print(f"  (no snapshot at {_SNAP11}: D and E skipped)")
+    else:
+        _frozen11 = [str(v) for v in _js11.load(open(_SNAP11))["row_ids"]]
+        check("D. the regeneration matches the frozen snapshot, IN ORDER",
+              _live11 == _frozen11,
+              f"n={len(_frozen11)}, same set={set(_live11) == set(_frozen11)}")
 
-    # ...but the SET stays the same: what moves is the order, and indexing is positional
-    check("E. the perturbed split changes the ORDER, not the set",
-          set(_va_bad.isic_id) == set(_va.isic_id)
-          and not np.array_equal(_va_bad.isic_id.to_numpy(), _va.isic_id.to_numpy()),
-          "same set, different order")
+        # The case that must FAIL: the same rows in another order.  @@VAL_SNAPSHOT@@ raises on
+        # it, and without this case D would pass on any permutation of the right rows.
+        _rotated11 = _live11[1:] + _live11[:1]
+        check("E. the same rows in a different ORDER do not match (the test can fail)",
+              _rotated11 != _frozen11 and set(_rotated11) == set(_frozen11),
+              "rotated by one")
 
-    check("F. no lesion and no patient crosses train/validation",
-          not (set(_tr.isic_id) & set(_va.isic_id)) and not (set(_tr.patient_id) & set(_va.patient_id)),
-          f"lesions {len(set(_tr.isic_id) & set(_va.isic_id))}, "
-          f"patients {len(set(_tr.patient_id) & set(_va.patient_id))}")
-
-    # the 04/08 fix: seeded shuffle -> same split as June, AND immune to a dirty RNG
-    _va_fix = _regen_validation(shuffle_rs=_SEED)[1]
-    check("H. seeded shuffle -> same split as June",
-          np.array_equal(_va_fix.target.to_numpy()[:128].astype(np.float32), _lab_june)
-          and np.array_equal(_va_fix.isic_id.to_numpy(), _va.isic_id.to_numpy()),
-          "random_state=CFG.seed changes no ISIC24 number")
-    _va_fix_dirty = _regen_validation(rng_offset=13, shuffle_rs=_SEED)[1]
-    check("I. seeded shuffle -> survives the dirty global RNG (this was the defect)",
-          np.array_equal(_va_fix_dirty.isic_id.to_numpy(), _va.isic_id.to_numpy()),
-          "13 draws consumed first: order unchanged")
-
-    _snap_p = os.path.join(BASE, "notebooks", "modality_attendance", "validation_ids.SEED49.json")
-    if os.path.exists(_snap_p):
-        import json as _json
-        _snap = _json.load(open(_snap_p))
-        check("G. the validation_ids snapshot matches the regeneration",
-              sorted(_va.isic_id.tolist()) == _snap["isic_ids_sorted"],
-              f"snapshot n={_snap['n']}")
+    # TR-04 moved the medians to the training fold.  This does not check where they come from --
+    # it checks that it MATTERS: on the whole frame they are different numbers, so a regression
+    # to the pre-TR-04 imputation is observable rather than a matter of trust.
+    _differ11 = [c for c in _IMPUTED_NUM11 if _tr11[c].median() != _all11[c].median()]
+    check("F. TR-04 is observable: the training-fold median differs from the whole-frame median",
+          bool(_differ11), f"differ on {_differ11}")
 
 # ======================================================================= 12 ===
 section("12. class_weight x scalar-reduced loss — the weighting that vanishes silently")
@@ -761,40 +737,80 @@ ok_e, _ = raises(lambda: _grid_guard(8, 8), ValueError)
 check("E. a grid equal to the CAM -> passes", not ok_e)
 
 # ======================================================================= 15 ===
-section("15. shuffle-probe pre-flight — the names it uses are the ones it declares")
-# The probe lives at the end of the training notebook and reuses builders and runner, which
-# sit above @@STOP@@. Its `_NEEDED` says which cell to run for each name: if someone edits
-# the cell and introduces an undeclared name, the error goes back to an opaque NameError.
-import ast as _ast                                              # noqa: E402
-import builtins as _bi                                          # noqa: E402
-import json as _js                                              # noqa: E402
+section("15. TRAINING CONTRACT — the properties that live only in notebook cells")
+# Rewritten 2026-08-11.  This section used to pre-flight the @@PROBE_SHUFFLE_FIXED@@ cell of
+# `isic24_modality_attendance_train.ipynb`: a probe the canonical notebook does not carry, in a
+# file that is now the backup.  What it presides over instead is the set of contracts that no
+# module can hold -- they are cell order, cell bindings and cell arithmetic -- so if this
+# section does not check them, nothing does.  Static: no TensorFlow, no GPU.
+import json as _js15                                              # noqa: E402
+import re as _re15                                                # noqa: E402
 
-_nbp = os.path.join(BASE, "notebooks", "modality_attendance",
-                    "isic24_modality_attendance_train.ipynb")
-_cells = [''.join(c["source"]) for c in _js.load(open(_nbp))["cells"]
-          if c["cell_type"] == "code"]
-_probe = [c for c in _cells if c.startswith("# @@PROBE_SHUFFLE_FIXED@@")]
-check("A. the @@PROBE_SHUFFLE_FIXED@@ cell exists and is unique", len(_probe) == 1, f"n={len(_probe)}")
+_NB15 = os.path.join(BASE, "notebooks", "modality_attendance",
+                     "isic24_modality_attendance_train_canon.ipynb")
+_cells15 = [''.join(c["source"]) for c in _js15.load(open(_NB15))["cells"]
+            if c["cell_type"] == "code"]
+_text15 = "\n".join(_cells15)
 
-if len(_probe) == 1:
-    _t = _ast.parse(_probe[0])
-    _load, _store = set(), set()
-    for _n in _ast.walk(_t):
-        if isinstance(_n, _ast.Name):
-            (_load if isinstance(_n.ctx, _ast.Load) else _store).add(_n.id)
-        elif isinstance(_n, (_ast.FunctionDef, _ast.ClassDef)):
-            _store.add(_n.name)
-        elif isinstance(_n, _ast.Lambda):
-            _store.update(a.arg for a in _n.args.args)
-    _free = _load - _store - set(dir(_bi))
-    _needed = _ast.literal_eval(_probe[0].split("_NEEDED = ")[1].split("\n_missing")[0])
-    check("B. every free name is declared in _NEEDED", not (_free - set(_needed)),
-          f"uncovered: {sorted(_free - set(_needed))}" if _free - set(_needed) else f"{len(_free)} names")
 
-    # ...and every marker it cites must actually exist in the notebook
-    _text = "\n".join(_cells)
-    _absent = sorted(m for m in set(_needed.values()) if m not in _text)
-    check("C. the markers cited by the pre-flight exist in the notebook", not _absent, str(_absent))
+def _cell15(marker):
+    """The one cell carrying a marker, or ''.  Cells are addressed by marker, never by index."""
+    hits = [c for c in _cells15 if c.startswith(f"# @@{marker}@@")]
+    return hits[0] if len(hits) == 1 else ""
+
+
+_ORDER15 = ("SPLIT", "IMPUTE", "RESAMPLE", "FEATURE_SPACE", "APPLY_FEATURES")
+_idx15 = {m: next((i for i, c in enumerate(_cells15) if c.startswith(f"# @@{m}@@")), -1)
+          for m in _ORDER15}
+check("A. TR-03/TR-04: split, then imputation, then resampling — in this order, or the fold is "
+      "taken on duplicated rows and the medians see the evaluation arm",
+      all(v >= 0 for v in _idx15.values()) and list(_idx15.values()) == sorted(_idx15.values()),
+      str(_idx15))
+
+check("B. TR-01: the shuffle buffer is a size, reshuffled each epoch, and a buffer of 1 raises",
+      "shuffle_buffer" in _cell15("CFG")
+      and "TRAIN_SHUFFLE_BUFFER > 1" in _cell15("APPLY_FEATURES")
+      and "reshuffle_each_iteration=True" in _cell15("APPLY_FEATURES"),
+      "declared in CFG, clamped and asserted in APPLY_FEATURES")
+
+check("C. TR-02: augmentation is applied exactly once, on the training view only",
+      _text15.count("map(augment_fn") == 1
+      and "map(augment_fn" in _cell15("APPLY_FEATURES")
+      and "augment" not in _cell15("BUILD_DATASETS"),
+      f'{_text15.count("map(augment_fn")} occurrences of map(augment_fn)')
+
+_apply15 = _cell15("APPLY_FEATURES")
+check("D. TR-10: the encoding is written once and no dataset is derived from itself",
+      _apply15.count('feature_space(x["features"])') == 1
+      and "validation_ds.map" not in _apply15 and "(testing_ds.map" not in _apply15
+      and "validation_base_ds" in _apply15,
+      "one encoder, views derived from the base datasets")
+
+check("E. TR-12: the schedule is built with the run's own epoch budget, and is not picked up "
+      "from globals()",
+      '"lr_cb" in globals()' not in _text15
+      and "get_lr_callback(CFG.batch_size, epochs" in _cell15("RUNNER")
+      and "def get_lr_callback(batch_size, epochs, mode" in _cell15("LR_SCHEDULE"),
+      "per-run schedule, no default epochs")
+
+_SWEEPS15 = ("SWEEP_VANILLA", "SWEEP_FIXED", "SWEEP_LEARNABLE", "SWEEP_LOSSREG",
+             "SWEEP_CF", "SWEEP_GATING")
+_sweeps15 = {m: _cell15(m) for m in _SWEEPS15}
+_impls15 = {m: _re15.findall(r'^IMPL = "(\w+)"', c, _re15.M) for m, c in _sweeps15.items()}
+_bad15 = sorted(m for m, v in _impls15.items() if len(v) != 1)
+check("F. TR-22: every sweep declares its family ONCE and hands the same name to open_study "
+      "and to run_model_experiment — written twice, they can disagree, and once did",
+      not _bad15 and len({v[0] for v in _impls15.values()}) == len(_SWEEPS15)
+      and all("open_study(IMPL, STUDY_TAG)" in c and "impl_name=IMPL" in c
+              for c in _sweeps15.values()),
+      f"not declared once in {_bad15}" if _bad15
+      else f"families {sorted(v[0] for v in _impls15.values())}")
+
+check("G. TR-22: no sweep mints its own study tag — a restarted sweep resumes its study "
+      "instead of opening a second one beside it",
+      "_make_exp_tag()" not in "\n".join(_sweeps15.values())
+      and all("STUDY_TAG" in c for c in _sweeps15.values()),
+      "STUDY_TAG declared in all six")
 
 # ======================================================================= 20 ===
 section("20. report figure — same population and same scale as the table beside it")
@@ -866,7 +882,7 @@ if not (_REL_META.exists() and _VAR_META.exists()):
 else:
     _pnb = os.path.join(BASE, "notebooks", "modality_attendance",
                         "isic24_modality_attendance_posthoc.ipynb")
-    _feat_cell = [s for s in (''.join(c["source"]) for c in _js.load(open(_pnb))["cells"])
+    _feat_cell = [s for s in (''.join(c["source"]) for c in _js15.load(open(_pnb))["cells"])
                   if "NEW_NUMERIC_COLUMNS = " in s]
     _ns_feat = {}
     exec(_feat_cell[0], _ns_feat)                                 # list literals only
@@ -1026,8 +1042,8 @@ _nb24 = os.path.join(BASE, "notebooks", "modality_attendance",
                      "isic24_modality_attendance_train_canon.ipynb")
 _cells24 = "\n".join(''.join(c["source"]) for c in _js24.load(open(_nb24))["cells"]
                      if c["cell_type"] == "code")
-_impl24 = set(_re24.findall(r'impl_name="(\w+)"', _cells24))
-check("A. the registry keys are exactly the impl_names the sweeps train under",
+_impl24 = set(_re24.findall(r'^IMPL = "(\w+)"', _cells24, _re24.M))
+check("A. the registry keys are exactly the families the sweeps declare",
       set(_registry) == _impl24, f"registry={sorted(_registry)} | sweeps={sorted(_impl24)}")
 
 _sig24 = {n: [a.arg for a in _fam_defs[n].args.args] for n in _registry.values()}
@@ -1087,6 +1103,70 @@ check("G. @@SMOKE@@ names every family and pins none of their sizes — the sett
       len(_smoke24) == 1 and not _missing24 and "model_fingerprint" in _smoke24[0]
       and not _re24.search(r"\b\d{7}\b", _smoke24[0]),
       f"families with no smoke setting: {_missing24}" if _missing24 else "6 named, 0 sizes")
+
+# ======================================================================= 25 ===
+section("25. RESUME — a finished run is never trained twice, an interrupted one always is")
+# TR-22.  Every execution of a sweep cell used to mint a fresh study_tag and `run_experiment`
+# always trained, so an interrupted sweep restarted left a second partial study beside the
+# first and the registry saw both.  `_completed_run` is the discriminator, and it lives in
+# @@RUNNER@@ because that is where the sweeps call it: it is extracted from the notebook and
+# executed here against fake run directories, so this tests the code the sweeps run.
+import ast as _ast25                                              # noqa: E402
+import json as _js25                                              # noqa: E402
+
+_runner25 = _cell15("RUNNER")
+_fn25 = next((_ast25.get_source_segment(_runner25, n)
+              for n in _ast25.parse(_runner25).body
+              if isinstance(n, _ast25.FunctionDef) and n.name == "_completed_run"), None)
+check("A. @@RUNNER@@ defines _completed_run", _fn25 is not None)
+
+if _fn25:
+    _ns25 = {"os": os, "json": _js25, "pd": pd}
+    exec(_fn25, _ns25)                                            # noqa: S102
+    _completed25 = _ns25["_completed_run"]
+
+    def _fake_run25(name, best_val_auc=True, ckpt=True, summary=True):
+        """A run directory as `run_experiment` leaves it, with pieces optionally missing."""
+        d = os.path.join(TMP, "resume", name)
+        os.makedirs(os.path.join(d, "checkpoints"), exist_ok=True)
+        cfg = {"impl_name": "vanilla", "model_name": "vanilla__baseline", "run_id": name}
+        if best_val_auc:
+            cfg["best_val_auc"] = 0.9012
+        with open(os.path.join(d, "config.json"), "w") as f:
+            _js25.dump(cfg, f)
+        if summary:
+            pd.DataFrame([{"run_id": name, "best_val_auc": 0.9012}]).to_csv(
+                os.path.join(d, "single_run_summary.csv"), index=False)
+        if ckpt:
+            open(os.path.join(d, "checkpoints", f"best_{cfg['model_name']}.keras"), "w").close()
+        return d
+
+    _done25 = _completed25(_fake_run25("complete"))
+    check("B. a finished run returns its summary, so a resumed sweep still writes a COMPLETE "
+          "combined_summary.csv instead of one holding only the runs it retrained",
+          _done25 is not None and float(_done25.iloc[0]["best_val_auc"]) == 0.9012,
+          "summary read back from disk")
+
+    check("C. a run interrupted during fit is trained again: `best_val_auc` reaches config.json "
+          "only after fit returns",
+          _completed25(_fake_run25("interrupted", best_val_auc=False)) is None)
+
+    check("D. a run whose checkpoint is gone is trained again — that is what deleting one to "
+          "re-train it looks like, and it needs no new knob",
+          _completed25(_fake_run25("no_ckpt", ckpt=False)) is None)
+
+    _empty25 = os.path.join(TMP, "resume", "empty")
+    os.makedirs(_empty25, exist_ok=True)
+    check("E. a directory that was only created is trained again",
+          _completed25(_empty25) is None)
+
+    # Case C of the suite's convention: what the OLD code had available could not tell the two
+    # apart, which is why the discriminator had to be a key INSIDE config.json.
+    check("F. directory existence is not completeness: it is True for the finished run and for "
+          "the interrupted one alike",
+          os.path.isdir(os.path.join(TMP, "resume", "complete"))
+          and os.path.isdir(os.path.join(TMP, "resume", "interrupted")),
+          "both exist, one is trainable")
 
 # =============================================================================
 shutil.rmtree(TMP, ignore_errors=True)

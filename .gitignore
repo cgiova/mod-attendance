@@ -53,3 +53,4 @@ Thumbs.db
 /.claude/
 /ISIC24_STATIC_AUDIT.md
 .vscode/settings.json
+notebooks/modality_attendance/mod-attendance.code-workspace
