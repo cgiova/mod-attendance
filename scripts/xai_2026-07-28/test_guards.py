@@ -1002,6 +1002,92 @@ _t23, _ok23 = _xs23.sample_audit(_m23, TMP, verbose=False)
 check("F. the audit reports across runs without raising",
       _ok23 is False and len(_t23) == 5, f"ok={_ok23}, rows={len(_t23)}")
 
+# ======================================================================= 24 ===
+section("24. model families — the builders are a module, and read nothing from a notebook")
+# Until 2026-08-11 the six architectures were notebook cells reading CFG, feature_space, adam
+# and bce off the global namespace: a cell can be edited after the run it produced, and no
+# test could import one. They are now `isic24/families.py`; this is its contract, checked
+# statically so the suite still needs no TensorFlow.
+import ast as _ast24                                            # noqa: E402
+import builtins as _bi24                                        # noqa: E402
+import json as _js24                                            # noqa: E402
+import re as _re24                                              # noqa: E402
+
+_fam_src = open(os.path.join(BASE, "src", "isic24", "families.py")).read()
+_fam_tree = _ast24.parse(_fam_src)
+_fam_defs = {n.name: n for n in _fam_tree.body if isinstance(n, _ast24.FunctionDef)}
+_fam_text = {n: _ast24.get_source_segment(_fam_src, f) for n, f in _fam_defs.items()}
+
+_reg_node = next(n for n in _fam_tree.body if isinstance(n, _ast24.Assign)
+                 and getattr(n.targets[0], "id", None) == "FAMILIES")
+_registry = {k.value: v.id for k, v in zip(_reg_node.value.keys, _reg_node.value.values)}
+
+_nb24 = os.path.join(BASE, "notebooks", "modality_attendance",
+                     "isic24_modality_attendance_train_canon.ipynb")
+_cells24 = "\n".join(''.join(c["source"]) for c in _js24.load(open(_nb24))["cells"]
+                     if c["cell_type"] == "code")
+_impl24 = set(_re24.findall(r'impl_name="(\w+)"', _cells24))
+check("A. the registry keys are exactly the impl_names the sweeps train under",
+      set(_registry) == _impl24, f"registry={sorted(_registry)} | sweeps={sorted(_impl24)}")
+
+_sig24 = {n: [a.arg for a in _fam_defs[n].args.args] for n in _registry.values()}
+check("B. every builder takes the signature the runner calls",
+      all(a == ["setting", "spec", "run_eagerly"] for a in _sig24.values()), str(_sig24))
+
+_bound24 = set(dir(_bi24))
+for _n in _fam_tree.body:
+    if isinstance(_n, (_ast24.Import, _ast24.ImportFrom)):
+        _bound24 |= {(a.asname or a.name).split(".")[0] for a in _n.names}
+    elif isinstance(_n, (_ast24.FunctionDef, _ast24.ClassDef)):
+        _bound24.add(_n.name)
+    elif isinstance(_n, _ast24.Assign):
+        _bound24 |= {t.id for t in _n.targets if isinstance(t, _ast24.Name)}
+
+
+def _free24(fn):
+    """Names a function reads and neither binds nor finds at module level."""
+    bound, loaded = set(), set()
+    for a in _ast24.walk(fn):
+        if isinstance(a, _ast24.arg):
+            bound.add(a.arg)
+        elif isinstance(a, (_ast24.FunctionDef, _ast24.ClassDef)):
+            bound.add(a.name)
+        elif isinstance(a, _ast24.Name):
+            (loaded if isinstance(a.ctx, _ast24.Load) else bound).add(a.id)
+    return loaded - bound - _bound24
+
+
+_leaks24 = {n: sorted(_free24(f)) for n, f in _fam_defs.items() if _free24(f)}
+check("C. no builder reads a global: everything comes from `setting` and `spec`",
+      not _leaks24, str(_leaks24))
+
+_old24 = _ast24.parse(
+    "def build(setting, run_eagerly=False):\n"
+    "    x = keras.Input(shape=(*CFG.image_size, 3))\n"
+    "    d = feature_space.get_encoded_features().shape[1]\n"
+    "    return x, d, adam, bce\n").body[0]
+check("D. the OLD cell-based builder fails that same check on all four notebook globals",
+      _free24(_old24) == {"CFG", "feature_space", "adam", "bce"}, str(sorted(_free24(_old24))))
+
+_mints24 = [n for n in _registry.values()
+            if "Adam.from_config(spec.optimizer.get_config())" in _fam_text[n]]
+_shares24 = [n for n in _registry.values() if "optimizer=spec.optimizer" in _fam_text[n]]
+check("E. every family mints a fresh optimizer, none shares the instance and its slots",
+      len(_mints24) == len(_registry) and not _shares24,
+      f"{len(_mints24)}/{len(_registry)} mint from config, shared by {_shares24}")
+
+_own_loss24 = [n for n in _registry.values() if "loss=spec.loss" not in _fam_text[n]]
+check("F. exactly one family compiles a loss of its own, and it is loss_regularization",
+      _own_loss24 == ["build_loss_regularized"], str(_own_loss24))
+
+_smoke24 = [c for c in _cells24.split("# @@") if c.startswith("SMOKE@@")]
+_missing24 = [k for k in _registry if f'"{k}"' not in _smoke24[0]]
+check("G. @@SMOKE@@ names every family and pins none of their sizes — the settings are explicit, "
+      "the parameter counts come from a fingerprint recorded per configuration",
+      len(_smoke24) == 1 and not _missing24 and "model_fingerprint" in _smoke24[0]
+      and not _re24.search(r"\b\d{7}\b", _smoke24[0]),
+      f"families with no smoke setting: {_missing24}" if _missing24 else "6 named, 0 sizes")
+
 # =============================================================================
 shutil.rmtree(TMP, ignore_errors=True)
 n_ok = sum(1 for _, o, _ in RESULTS if o)
