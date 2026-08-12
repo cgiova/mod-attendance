@@ -27,6 +27,8 @@ baseline (constant grey image, encoded-zero features), so a contribution of zero
 logit exactly.
 
 Cost: one forward pass per run over the adopted sample.  No gradients, no perturbations.
+Once written, the same table also answers *"what if the fusion were re-biased?"* with no
+model at all — ``gamma_curve`` below.
 """
 
 from __future__ import annotations
@@ -136,6 +138,15 @@ def _baseline_batch(batch):
             "features": np.zeros_like(np.asarray(batch["features"])[:1])}
 
 
+def _derived(df):
+    """The columns that are functions of the two centred terms. One formula, two callers."""
+    df["total_logit_centered"] = df["image_logit_centered"] + df["tabular_logit_centered"]
+    denom = df["image_logit_centered"].abs() + df["tabular_logit_centered"].abs()
+    df["image_abs_share_descriptive"] = np.where(denom > 0,
+                                                 df["image_logit_centered"].abs() / denom, np.nan)
+    return df
+
+
 def contributions(model, batch, check_order=True):
     """Per-sample logit decomposition for one model. Raises if it does not reconstruct."""
     split = head_split(model)
@@ -161,18 +172,17 @@ def contributions(model, batch, check_order=True):
             f"{model.name}: logit split does not reconstruct the prediction "
             f"(max |delta| = {delta:.2e} > {RECON_TOL:.0e}); the head is not additive")
 
-    df = pd.DataFrame({
+    df = _derived(pd.DataFrame({
         "prediction": pred,
         "image_logit_raw": c_img,
         "tabular_logit_raw": c_tab,
         "image_logit_centered": c_img - off_img,
         "tabular_logit_centered": c_tab - off_tab,
-    })
-    df["total_logit_centered"] = df["image_logit_centered"] + df["tabular_logit_centered"]
-    denom = df["image_logit_centered"].abs() + df["tabular_logit_centered"].abs()
-    df["image_abs_share_descriptive"] = np.where(denom > 0,
-                                                 df["image_logit_centered"].abs() / denom, np.nan)
+    }))
+    # The gammas travel with the table: they are the fusion bias these numbers were measured
+    # at, and `gamma_curve` needs them to re-derive the contributions at any other one.
     meta = dict(head_kind=split["kind"], bias=split["bias"],
+                gamma_img=split["gamma_img"], gamma_tab=split["gamma_tab"],
                 image_baseline_logit=off_img, tabular_baseline_logit=off_tab,
                 recon_max_abs_delta=delta,
                 image_head_dim=int(u_img.shape[-1]), tabular_head_dim=int(u_tab.shape[-1]))
@@ -325,3 +335,105 @@ def decompose_study(master, art_path, subset_idx=None, central=None, overwrite=F
     by_run.to_csv(os.path.join(out_dir, AGG_BY_RUN), index=False)
     by_family.to_csv(os.path.join(out_dir, AGG_BY_FAMILY), index=False)
     return by_run, by_family, pd.concat(per_sample, ignore_index=True)
+
+
+# --------------------------------------------------------------------------- #
+# Post-hoc fusion re-biasing: attendance as a function of gamma, at no cost
+# --------------------------------------------------------------------------- #
+# The branch activations do not depend on gamma, so a gamma is a multiplier on a branch term
+# and on nothing else. Every quantity in the decomposition is therefore linear in it, and the
+# re-derivation is exact rather than an approximation. The counterfactual is "this frozen
+# head, re-biased" -- the same one `@@CF_GAMMA_SWEEP@@` evaluates on GPU, except that it is
+# defined for every additive head, not only for the one whose gammas are assignable weights.
+
+GAMMA_COLS = ("gamma_img", "gamma_tab")
+
+# The offsets `@@CF_GAMMA_SWEEP@@` re-scores on GPU: gamma_img = 1-d, gamma_tab = 1+d.
+DEFAULT_DELTAS = np.round(np.arange(-0.5, 0.501, 0.125), 3)
+
+GAMMA_BY_RUN = "logit_gamma_curve_by_run.csv"
+GAMMA_BY_FAMILY = "logit_gamma_curve_by_family.csv"
+
+GAMMA_REPORT_COLS = ["mean_image_abs_share_descriptive", "frac_image_dominated",
+                     "mean_image_target_aligned", "mean_tabular_target_aligned", "sample_auc"]
+
+
+def base_gamma(df, master_row=None):
+    """The fusion bias a saved decomposition was measured at.
+
+    Tables written since the gammas entered `meta` carry it. The ones written before do not,
+    and there only ``FusionWithGamma`` can differ from ``(1, 1)``: ``head_split`` reads 1.0 off
+    every other head by construction. That single case is bridged from the run's master row,
+    which records the gammas it trained with -- never assumed.
+    """
+    if all(c in df.columns for c in GAMMA_COLS):
+        return float(df["gamma_img"].iat[0]), float(df["gamma_tab"].iat[0])
+    if df["head_kind"].iat[0] != "FusionWithGamma":
+        return 1.0, 1.0
+    if master_row is None or any(pd.isna(master_row.get(c)) for c in GAMMA_COLS):
+        raise KeyError(
+            f"{df['run_id'].iat[0]}: this decomposition predates the gamma provenance columns "
+            f"and its head is FusionWithGamma, so the gammas it was measured at are unknown. "
+            f"Pass the run's master row (it carries gamma_img/gamma_tab), or re-run "
+            f"decompose_run(..., overwrite=True) to rewrite the table with them.")
+    return float(master_row["gamma_img"]), float(master_row["gamma_tab"])
+
+
+def rescale_gamma(df, gamma_img, gamma_tab, base=(1.0, 1.0)):
+    """One run's decomposition re-derived at a different fusion bias. No model, no forward."""
+    k_img, k_tab = gamma_img / base[0], gamma_tab / base[1]
+    out = df.copy()
+    for side, k in (("image", k_img), ("tabular", k_tab)):
+        out[f"{side}_logit_raw"] = k * df[f"{side}_logit_raw"]
+        out[f"{side}_baseline_logit"] = k * df[f"{side}_baseline_logit"]
+        out[f"{side}_logit_centered"] = out[f"{side}_logit_raw"] - out[f"{side}_baseline_logit"]
+
+    z = out["bias"] + out["image_logit_raw"] + out["tabular_logit_raw"]
+    out["prediction"] = 1.0 / (1.0 + np.exp(-z))
+    out["gamma_img"], out["gamma_tab"] = gamma_img, gamma_tab
+    if (k_img, k_tab) != (1.0, 1.0):
+        # The saved delta certifies a reconstruction against a forward pass at the base gamma.
+        # It says nothing about these numbers, so it does not travel with them.
+        out["recon_max_abs_delta"] = np.nan
+    return _target_aligned(_derived(out), out["target"])
+
+
+def gamma_curve(per_sample, art_path, master=None, deltas=DEFAULT_DELTAS, out_dir=None):
+    """Attendance against fusion bias, for every run, re-derived from the tables on disk.
+
+    ``per_sample`` is the third value ``decompose_study`` returns. ``master`` is needed only
+    for runs whose saved table predates the gamma provenance columns (see ``base_gamma``).
+
+    ``sample_auc`` is measured on the adopted XAI sample, not on the validation set: it is
+    comparable across gammas inside this table, and not with ``best_val_auc`` or with the AUC
+    that `@@CF_GAMMA_SWEEP@@` re-scores on the full validation set.
+    """
+    from sklearn.metrics import roc_auc_score
+
+    master_rows = {r["run_id"]: r for _, r in master.iterrows()} if master is not None else {}
+
+    rows = []
+    for run_id, df in per_sample.groupby("run_id", sort=False):
+        base = base_gamma(df, master_rows.get(run_id))
+        for d in deltas:
+            g_img, g_tab = float(1.0 - d), float(1.0 + d)
+            scaled = rescale_gamma(df, g_img, g_tab, base=base)
+            row = _run_row(scaled)
+            row.update(impl_name=df["impl_name"].iat[0], setting_tag=df["setting_tag"].iat[0],
+                       seed=df["seed"].iat[0], delta=float(d),
+                       gamma_img=g_img, gamma_tab=g_tab,
+                       base_gamma_img=base[0], base_gamma_tab=base[1],
+                       sample_auc=float(roc_auc_score(scaled["target"], scaled["prediction"])))
+            rows.append(row)
+
+    by_run = pd.DataFrame(rows)
+    by_family = (by_run.groupby(["impl_name", "delta", "gamma_img", "gamma_tab"])[GAMMA_REPORT_COLS]
+                 .agg(["mean", "std"]).round(4))
+    by_family.columns = [f"{c}__{stat}" for c, stat in by_family.columns]
+    by_family = by_family.reset_index()
+
+    out_dir = out_dir or os.path.join(art_path, "runs", xs.AGGREGATE_DIRNAME)
+    os.makedirs(out_dir, exist_ok=True)
+    by_run.to_csv(os.path.join(out_dir, GAMMA_BY_RUN), index=False)
+    by_family.to_csv(os.path.join(out_dir, GAMMA_BY_FAMILY), index=False)
+    return by_run, by_family
