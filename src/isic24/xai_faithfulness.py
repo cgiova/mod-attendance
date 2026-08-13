@@ -555,27 +555,30 @@ def faith_subsets(k=5, n=FAITH_N_SAMPLES, seed=0, n_val=None):
     return [np.arange(n)] + [np.sort(rest[i * n:(i + 1) * n]) for i in range(k - 1)]
 
 
-# Campione ATTIVO di default. `None` = comportamento storico (le prime N righe). Lo imposta
-# `xai_subset.adopt(...)` una volta per sessione, ed e' cosi' che la scelta del campione
-# diventa un DEFAULT del framework invece di un argomento da ricordarsi a ogni chiamata:
-# ogni call site che non passa `subset_idx` eredita questo.
+# The sample ACTIVE in this session, set once by `xai_subset.adopt(...)`. Making it a default
+# of the framework instead of an argument to remember is what keeps every engine on the same
+# rows: each call site that does not pass `subset_idx` inherits this one.
 FAITH_SUBSET_IDX = None
 
 
-def _build_faith_subset(n, subset_idx=None):
-    """Validation samples for the faithfulness run.
+def _build_faith_subset(subset_idx=None):
+    """The validation rows a faithfulness run explains, as (raw features, images, labels).
 
-    subset_idx=None  -> `FAITH_SUBSET_IDX` se impostato, altrimenti le prime `n` righe.
-    subset_idx=array -> quelle righe di validation (usato dal check a 5 sottoinsiemi).
-
-    NB `faith_subsets` costruisce apposta il sottoinsieme 0 come `np.arange(n)`, cioe' il
-    prefisso: quel check confronta batch diversi FRA LORO e deve restare sul prefisso anche
-    quando il default e' un altro. Passa sempre `subset_idx` esplicito, quindi non eredita.
+    `subset_idx=None` inherits the adopted sample. There is no third behaviour: the fallback
+    this replaces -- the first `n` rows -- built a second population under the same name, and
+    it stayed invisible until the two were found to share 41 rows out of 128.
     """
-    if subset_idx is None and FAITH_SUBSET_IDX is not None:
+    if subset_idx is None:
         subset_idx = FAITH_SUBSET_IDX
+    if subset_idx is None:
+        raise RuntimeError(
+            "[FAITH SUBSET] no XAI sample is adopted in this session, so there are no rows to "
+            "explain.\n  Call xs.adopt(validation_df, n=CFG.xai_n, balance=CFG.xai_balance) "
+            "before any engine: every run then explains the SAME lesions, which is what makes "
+            "families and seeds comparable.")
+    subset_idx = np.asarray(subset_idx, int)
     raw_full = _CTX.validation_df.reset_index(drop=True)
-    take_n = n if subset_idx is None else int(np.max(subset_idx)) + 1
+    take_n = int(subset_idx.max()) + 1
     imgs, labs, got = [], [], 0
     for x, y in _CTX.validation_ds:
         b = int(x["images"].shape[0])
@@ -587,12 +590,8 @@ def _build_faith_subset(n, subset_idx=None):
             break
     imgs = np.concatenate(imgs, 0).astype(np.float32)
     labs = np.concatenate(labs, 0)
-    if subset_idx is not None:
-        subset_idx = np.asarray(subset_idx, int)
-        return (raw_full.iloc[subset_idx][_CTX.feat_cols].reset_index(drop=True),
-                imgs[subset_idx], labs[subset_idx])
-    raw_df = raw_full.iloc[:got][_CTX.feat_cols].reset_index(drop=True)
-    return raw_df, imgs, labs
+    return (raw_full.iloc[subset_idx][_CTX.feat_cols].reset_index(drop=True),
+            imgs[subset_idx], labs[subset_idx])
 
 
 # Impronta del campione ATTIVO in questa sessione. `None` = comportamento storico (le prime
@@ -602,7 +601,10 @@ ACTIVE_SUBSET_FINGERPRINT = None
 
 
 def _load_shap_values(run_dir, best_epoch, model, raw_df, imgs):
-    """Reuse the per-sample SHAP arrays saved by ShapCallback; fallback to recompute.
+    """Reuse the per-sample SHAP arrays saved by ShapCallback; raise if there are none.
+
+    It does NOT recompute: `ShapEngine` lives in the training notebook and is deliberately not
+    imported here, so a run with no SHAP on disk has no gradient ranking until one is generated.
 
     GUARD SULL'IDENTITA' DEL CAMPIONE (2026-07-31). Gli npz salvano `explained_indices` come
     POSIZIONI (0..127), non come ISIC id. Con un campione diverso dal prefisso quelle
@@ -803,28 +805,29 @@ def _bootstrap_ci(vals, n_boot=2000, seed=0):
     return float(vals.mean()), float(np.percentile(bs, 2.5)), float(np.percentile(bs, 97.5))
 
 
-def explanation_faithfulness(model, run_dir, best_epoch, n_samples=None, budgets=None,
+def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
                              methods=None, do_insertion=None, n_random=None, grid=None,
                              rng_seed=None, save=True, verbose=True,
                              subset_idx=None, blur_sigma=None, tab_imp_override=None,
-                             out_name="faithfulness", out_dir=None):
-    """Defaults reproduce the original behaviour exactly.
+                             out_name="faithfulness", out_dir=None, allow_clobber=False):
+    """Deletion/insertion faithfulness of a trained model, as a flat dict of headline metrics.
 
-    subset_idx       : validation rows to explain (default: first FAITH_N_SAMPLES).
+    subset_idx       : validation rows to explain (default: the sample adopted for the session).
     blur_sigma       : image-removal blur strength (default: FAITH_BLUR_SIGMA = 8).
     tab_imp_override : (n, 39) per-sample raw importance from ANY attributor, replacing the
                        |SHAP| ranking loaded from disk. This is how Stage 2 feeds in the
                        aligned Permutation attributor.
     out_name         : basename prefix for every file written, so variants never collide.
-    out_dir          : WHERE to write. Default (None) = run_dir/xai/faithfulness/, i.e. next to the
-                       published artifacts. The robustness stages pass a directory under
-                       runs/_robustness/ instead, so the new checks stay physically separate from
-                       the published results and can be deleted wholesale without touching them.
+    out_dir          : WHERE to write. Default (None) = run_dir/xai/faithfulness/. The robustness
+                       stages pass a directory under runs/_robustness/ instead, so their checks
+                       stay physically separate and can be deleted wholesale.
     """
-    """Compute deletion/insertion faithfulness for a trained model. Saves artifacts
-    under run_dir/xai/faithfulness/ and returns a flat dict of headline metrics."""
     t0 = time.time()
-    n_samples = n_samples or FAITH_N_SAMPLES
+    if save and out_dir is None:
+        # Before the GPU, not after it: a run that already holds curves is refused here rather
+        # than at the write, which used to throw away a full pass over the sample.
+        from . import xai_driver as _xd
+        _xd.assert_writable(run_dir, engines=("faithfulness",), allow_clobber=allow_clobber)
     budgets = tuple(budgets or FAITH_BUDGETS)
     methods = tuple(methods or FAITH_METHODS)
     do_insertion = FAITH_DO_INSERTION if do_insertion is None else do_insertion
@@ -836,7 +839,7 @@ def explanation_faithfulness(model, run_dir, best_epoch, n_samples=None, budgets
     need_tab = ("tabular" in methods) or ("joint" in methods)
     need_img = ("image" in methods) or ("joint" in methods)
 
-    raw_df, imgs, labs = _build_faith_subset(n_samples, subset_idx=subset_idx)
+    raw_df, imgs, labs = _build_faith_subset(subset_idx=subset_idx)
     tab_imp = None
     if need_tab:
         if tab_imp_override is not None:
@@ -947,32 +950,9 @@ def explanation_faithfulness(model, run_dir, best_epoch, n_samples=None, budgets
 
     if save:
         fdir = out_dir or os.path.join(run_dir, "xai", "faithfulness")
-        # GUARD — non scrivere un artefatto calcolato su un campione adottato dentro
-        # `xai/faithfulness/`, che e' la cartella dei numeri PUBBLICATI (prefisso storico).
-        # `xs.adopt()` imposta il globale FAITH_SUBSET_IDX e `_build_faith_subset` ci ricade
-        # a ogni `subset_idx=None`: il loop post-hoc, che passa out_dir=None e
-        # out_name="faithfulness", sovrascriverebbe il canonico con numeri di un altro
-        # campione, senza errore e con valori plausibili.
-        #
-        # 2026-08-01: il guard NON e' piu' "out_dir deve stare fuori dalle run". Gli
-        # artefatti del campione vivono ora dentro la run, in `xai/shap_tab/`
-        # (`xai_subset.out_dir_for`), quindi la condizione si e' spostata su cosa e' la
-        # cartella di destinazione — che e' anche piu' robusta di prima: adesso becca anche
-        # chi passa `out_dir=<run>/xai/faithfulness` a mano.
-        if FAITH_SUBSET_IDX is not None and os.path.basename(
-                os.path.normpath(fdir)) == "faithfulness":
-            raise RuntimeError(
-                f"\n  SUBSET GUARD: un campione XAI e' adottato in questa sessione "
-                f"(n={len(FAITH_SUBSET_IDX)}, impronta {ACTIVE_SUBSET_FINGERPRINT}),\n"
-                f"  ma questa chiamata scriverebbe '{out_name}' nella cartella dei numeri "
-                f"PUBBLICATI:\n"
-                f"    {fdir}\n"
-                f"  I numeri sarebbero di un campione diverso da quello pubblicato.\n"
-                f"  Rimedi: out_dir=xs.out_dir_for(run_dir, 'shap_tab'), oppure disarmare\n"
-                f"  il campione con xs.adopt(validation_df, balance=None).")
         os.makedirs(fdir, exist_ok=True)
-        # Traccia del campione dentro l'artefatto stesso: un npz senza questa chiave e' del
-        # prefisso storico, e non c'e' altro modo di distinguerli a posteriori.
+        # The sample stamped inside the artifact itself: an npz without these keys is from the
+        # historical prefix, and there is no other way to tell them apart afterwards.
         _eff_subset = subset_idx if subset_idx is not None else FAITH_SUBSET_IDX
         results["subset_fingerprint"] = ACTIVE_SUBSET_FINGERPRINT
         results["n_subset"] = int(len(_eff_subset)) if _eff_subset is not None else None
@@ -1233,37 +1213,31 @@ def aligned_signed_faithfulness(model, run_dir, best_epoch, phi=None, labels=Non
                                 background="baseline", out_dir=None,
                                 out_prefix="faithfulness_aligned_signed",
                                 save=True, verbose=True, q_maxes=(0.20,),
-                                subset_idx=None, n_samples=None,
-                                allow_clobber=False, **kw):
+                                subset_idx=None, allow_clobber=False, **kw):
     """Deletion + insertion under each sign convention, from ONE attribution pass.
 
-    Scrive in `<run_dir>/xai/shap_tab/` — cartella propria, dentro la run, che nessun
-    motore canonico tocca. Nomi `out_prefix`-ati, quindi non sfiora `faithfulness.json` /
-    `faithfulness_curves.npz` ne' `faithfulness_aligned_attr.csv`.
+    Writes into `<run_dir>/xai/shap_tab/` — its own folder inside the run, which no canonical
+    engine touches. Every name is `out_prefix`-ed, so it never grazes `faithfulness.json`,
+    `faithfulness_curves.npz` or `faithfulness_aligned_attr.csv`.
 
-    Produce anche la FIGURA per-run (`plots/`): e' il motore a farla, non una cella a valle.
+    It also produces the per-run FIGURE (`plots/`): the engine draws it, not a cell downstream.
     """
     from . import xai_subset as _xs
     if out_dir is None:
         out_dir = _xs.out_dir_for(run_dir, "shap_tab")
-        # Il write guard vale anche qui, ora che si scrive DENTRO la run: rieseguire su una
-        # run che ha gia' `xai/shap_tab/` la sovrascriverebbe. Solo sulla destinazione di
-        # default — con `out_dir` esplicito (la sonda, i confronti) la scrittura e' altrove
-        # e non c'e' niente da proteggere.
+        # The write guard applies here too, now that this writes INSIDE the run: re-running on
+        # a run that already has `xai/shap_tab/` would overwrite it. Only on the default
+        # destination — with an explicit `out_dir` the write is elsewhere and protects nothing.
         if save:
             from . import xai_driver as _xd
             _xd.assert_writable(run_dir, engines=("shap_tab",), allow_clobber=allow_clobber)
-    # `subset_idx` deve arrivare a ENTRAMBI i passi: le attribuzioni si calcolano su queste
-    # righe e la perturbazione deve girare sulle STESSE. Prima non era un parametro, quindi
-    # passarlo solo in **kw dava attribuzioni sul prefisso e cancellazioni sul campione
-    # stratificato -- disallineate, senza errore.
+    # `subset_idx` must reach BOTH steps: the attributions are computed on these rows and the
+    # perturbation must run on the SAME ones. Passing it only through **kw once gave
+    # attributions on one sample and deletions on another, misaligned and without an error.
     if raw_df is None or imgs is None or labels is None:
-        raw_df, imgs, labels = _build_faith_subset(n_samples or FAITH_N_SAMPLES,
-                                                   subset_idx=subset_idx)
+        raw_df, imgs, labels = _build_faith_subset(subset_idx=subset_idx)
     if subset_idx is not None:
         kw["subset_idx"] = subset_idx
-    elif n_samples is not None:
-        kw["n_samples"] = n_samples
     if phi is None:
         phi, meta = aligned_tab_attributions(model, raw_df, imgs,
                                              background=background, verbose=verbose)

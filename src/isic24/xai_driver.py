@@ -222,11 +222,11 @@ _CLOBBERABLE = {
         # sono artefatti storici e nessuna scrittura nuova puo' finirci sopra.
         "lore_sa": ("xai/lore_sa/epoch*", "xai/lore_sa/lore_sa_per_epoch.csv"),
     },
-    # Non e' un engine di `make_xai_callbacks`: lo scrive
-    # `xai_faithfulness.aligned_signed_faithfulness`. Sta qui perche' `existing_xai_artifacts`
-    # e' l'unico posto che sa cosa una run ha gia' prodotto, e il loop della fedelta' lo
-    # interroga per la stessa ragione degli altri.
+    # Not engines of `make_xai_callbacks`: `xai_faithfulness` writes both. They are here
+    # because `existing_xai_artifacts` is the only place that knows what a run has already
+    # produced, and the faithfulness loop asks it for the same reason the others do.
     "shap_tab": ("xai/shap_tab/faithfulness_aligned_signed_*.json",),
+    "faithfulness": ("xai/faithfulness/*.json", "xai/faithfulness/*_curves.npz"),
 }
 
 
@@ -272,20 +272,20 @@ def assert_writable(run_dir, engines=ALL_ENGINES, allow_clobber=False):
         busy = sorted(e for e in engines if existing_xai_artifacts(run_dir, (e,)))
         free = sorted(set(engines) - set(busy))
         shown = "\n    ".join(os.path.relpath(h, run_dir) for h in hits[:6])
-        more = f"\n    ... e altri {len(hits) - 6}" if len(hits) > 6 else ""
+        more = f"\n    ... and {len(hits) - 6} more" if len(hits) > 6 else ""
         raise RuntimeError(
-            f"[XAI WRITE GUARD] {run_dir}\n  ha gia' {len(hits)} artefatti su disco per "
+            f"[XAI WRITE GUARD] {run_dir}\n  already holds {len(hits)} artifacts on disk for "
             f"{busy}:\n    {shown}{more}\n"
-            f"  Rieseguire qui li SOVRASCRIVE. Nota che overwrite=False non protegge: salta "
-            f"solo se esiste xai/xai_status.json, che nessuna run canonica ha (le 110 vengono "
-            f"dal vecchio percorso in-training).\n"
-            + (f"  Gli engine {free} qui non hanno artefatti: engines={tuple(free)} li "
-               f"aggiunge senza toccare niente.\n" if free else "")
-            + f"  **overwrite=True NON basta a passare di qui**: dice 'ricalcola', non 'puoi "
-              f"distruggere'. L'unico consenso e' allow_clobber=True (o "
+            f"  Re-running here OVERWRITES them. `overwrite=False` does not protect you: it "
+            f"skips only when xai/xai_status.json exists, which the in-training path never "
+            f"wrote.\n"
+            + (f"  Engines {free} have no artifacts here: engines={tuple(free)} adds them "
+               f"without touching anything.\n" if free else "")
+            + f"  **overwrite=True is NOT enough to pass**: it says 'recompute', not 'you may "
+              f"destroy'. The only consent is allow_clobber=True (or "
               f"xai_driver.CANONICAL_WRITE_GUARD = False).\n"
-              f"  In alternativa copia config.json + checkpoints in una dir temporanea e punta "
-              f"il driver li'.")
+              f"  Otherwise copy config.json + checkpoints into a temporary directory and point "
+              f"the driver there.")
     return hits
 
 

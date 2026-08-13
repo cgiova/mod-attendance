@@ -145,6 +145,7 @@ np.savez(os.path.join(canon, "shap_arrays_epoch_003.npz"),        # WITHOUT fing
 raw = pd.DataFrame({"a": np.arange(N)})
 
 _prev_fp = xf.ACTIVE_SUBSET_FINGERPRINT
+_prev_idx = xf.FAITH_SUBSET_IDX
 _prev_sub = xd.SHAP_KWARGS.get("subset_fingerprint")
 try:
     # `shap_subdir()` derives the folder from here: without a fingerprint it reads
@@ -160,8 +161,16 @@ try:
     ok_b, msg_b = raises(lambda: xf._load_shap_values(
         os.path.join(TMP, "canon"), 3, None, raw, None))
     check("B. no active sample -> does not raise (canonical regime)", not ok_b, msg_b)
+
+    # The other half of the same defect: with no sample adopted, `_build_faith_subset` used to
+    # take the first `n` validation rows, which is how one run came to hold two populations
+    # under one name -- the prefix and the sample, overlapping in 41 rows of 128.
+    xf.FAITH_SUBSET_IDX = None
+    ok_c, msg_c = raises(lambda: xf._build_faith_subset(), RuntimeError)
+    check("C. no adopted sample -> the rows to explain are not invented", ok_c, msg_c)
 finally:
     xf.ACTIVE_SUBSET_FINGERPRINT = _prev_fp
+    xf.FAITH_SUBSET_IDX = _prev_idx
     if _prev_sub is not None:
         xd.SHAP_KWARGS["subset_fingerprint"] = _prev_sub
 
@@ -185,6 +194,17 @@ os.makedirs(os.path.join(interrupted, "xai", "shap", "epoch_003"), exist_ok=True
 ok_d, _ = raises(lambda: xd.assert_writable(interrupted, engines=("shap",)))
 check("D. empty dir from an interrupted run -> does NOT block", not ok_d,
       "regression of the a1p000 defect of 30/07")
+
+# The faithfulness curves are here too, and this is what protects them: the folder name no
+# longer decides anything, what a run already HOLDS does. June refuses, the canonical runs --
+# empty by construction -- accept.
+faith = os.path.join(TMP, "faith")
+os.makedirs(os.path.join(faith, "xai", "faithfulness"), exist_ok=True)
+open(os.path.join(faith, "xai", "faithfulness", "faithfulness.json"), "w").close()
+ok_e, msg_e = raises(lambda: xd.assert_writable(faith, engines=("faithfulness",)))
+check("E. a run that already holds curves refuses a second faithfulness pass", ok_e, msg_e)
+ok_f, _ = raises(lambda: xd.assert_writable(empty, engines=("faithfulness",)))
+check("F. a run with no curves accepts one", not ok_f)
 
 # ======================================================================== 5 ===
 section("5. LORE_SA_DEVICE must not apply to the other engines")
@@ -393,6 +413,24 @@ else:
     _differ11 = [c for c in _IMPUTED_NUM11 if _tr11[c].median() != _all11[c].median()]
     check("F. TR-04 is observable: the training-fold median differs from the whole-frame median",
           bool(_differ11), f"differ on {_differ11}")
+
+    # The post-hoc rebuilds nothing: it LOADS `evaluation_frame.parquet`.  D compares the
+    # regeneration with the id list; these two compare it with the file that is actually read,
+    # which is where a frame and its snapshot could drift apart unseen.
+    _FRAMES11 = {n: os.path.join(ART, f"{n}_frame.parquet") for n in ("evaluation", "training")}
+    if not all(os.path.exists(p) for p in _FRAMES11.values()):
+        print("  (frozen frames unavailable: G and H skipped)")
+    else:
+        _fe11 = pd.read_parquet(_FRAMES11["evaluation"])
+        _ft11 = pd.read_parquet(_FRAMES11["training"])
+        check("G. the frozen evaluation frame IS the regenerated arm, in order",
+              [str(v) for v in _fe11.isic_id] == _live11,
+              f"{len(_fe11)} frozen rows against {len(_va11)} regenerated")
+        check("H. the two frozen frames share no lesion and no patient",
+              not (set(_fe11.isic_id) & set(_ft11.isic_id))
+              and not (set(_fe11.patient_id) & set(_ft11.patient_id)),
+              f"lesions {len(set(_fe11.isic_id) & set(_ft11.isic_id))}, "
+              f"patients {len(set(_fe11.patient_id) & set(_ft11.patient_id))}")
 
 # ======================================================================= 12 ===
 section("12. class_weight x scalar-reduced loss — the weighting that vanishes silently")
@@ -743,11 +781,25 @@ section("15. TRAINING CONTRACT — the properties that live only in notebook cel
 # file that is now the backup.  What it presides over instead is the set of contracts that no
 # module can hold -- they are cell order, cell bindings and cell arithmetic -- so if this
 # section does not check them, nothing does.  Static: no TensorFlow, no GPU.
+import glob as _glob15                                            # noqa: E402
 import json as _js15                                              # noqa: E402
 import re as _re15                                                # noqa: E402
 
-_NB15 = os.path.join(BASE, "notebooks", "modality_attendance",
-                     "isic24_modality_attendance_train_canon.ipynb")
+
+def _notebook15(marker):
+    """The active dataset's notebook carrying a marker.  Every dataset brings its own
+    train/post-hoc pair under its own file name, so a notebook is addressed by the dataset it
+    belongs to and a marker only it holds, never by name."""
+    hits = [p for p in sorted(_glob15.glob(os.path.join(
+                BASE, "notebooks", "modality_attendance", f"*{_paths0.DATASET}*.ipynb")))
+            if f"# @@{marker}@@" in open(p, encoding="utf-8").read()]
+    if len(hits) != 1:
+        raise FileNotFoundError(f"@@{marker}@@ is in {len(hits)} {_paths0.DATASET} notebooks: "
+                                f"{[os.path.basename(h) for h in hits]}")
+    return hits[0]
+
+
+_NB15 = _notebook15("FAMILIES")
 _cells15 = [''.join(c["source"]) for c in _js15.load(open(_NB15))["cells"]
             if c["cell_type"] == "code"]
 _text15 = "\n".join(_cells15)
@@ -880,14 +932,10 @@ def _header(path):
 if not (_REL_META.exists() and _VAR_META.exists()):
     print("  (release or variant metadata unavailable: section skipped)")
 else:
-    _pnb = os.path.join(BASE, "notebooks", "modality_attendance",
-                        "isic24_modality_attendance_posthoc.ipynb")
-    _feat_cell = [s for s in (''.join(c["source"]) for c in _js15.load(open(_pnb))["cells"])
-                  if "NEW_NUMERIC_COLUMNS = " in s]
     _ns_feat = {}
-    exec(_feat_cell[0], _ns_feat)                                 # list literals only
-    _release = _ns_feat["CATEGORICAL_COLUMNS"] + _ns_feat["NUMERIC_COLUMNS"]
-    _engineered = _ns_feat["NEW_CATEGORICAL_COLUMNS"] + _ns_feat["NEW_NUMERIC_COLUMNS"]
+    exec(_cell15("FEAT_COLS"), _ns_feat)                          # list literals only
+    _release = _ns_feat["BASE_CAT_COLS"] + _ns_feat["BASE_NUM_COLS"]
+    _engineered = _ns_feat["NEW_CAT_COLS"] + _ns_feat["NEW_NUM_COLS"]
     _rel_h, _var_h = _header(_REL_META), _header(_VAR_META)
 
     check("A. every column called `release` is in the ISIC release",
@@ -1167,6 +1215,32 @@ if _fn25:
           os.path.isdir(os.path.join(TMP, "resume", "complete"))
           and os.path.isdir(os.path.join(TMP, "resume", "interrupted")),
           "both exist, one is trainable")
+
+# `open_study` is the one door of all six sweeps — section 15 case F proves each hands it
+# `(IMPL, STUDY_TAG)` — so the resume contract is tested once and holds for every family.
+import re as _re25                                              # noqa: E402
+from isic24.run_ids import make_exp_tag as _mk25                # noqa: E402
+
+_open25 = "\n".join(
+    _ast25.get_source_segment(_runner25, n) for n in _ast25.parse(_runner25).body
+    if (isinstance(n, _ast25.FunctionDef) and n.name == "open_study")
+    or (isinstance(n, _ast25.Assign) and getattr(n.targets[0], "id", "") == "_STUDY_TAG_RE"))
+_ns25o = {"os": os, "re": _re25, "RUNS_PATH": os.path.join(TMP, "studies"),
+          "_make_exp_tag": lambda: "20260812-000000"}
+exec(_open25, _ns25o)                                           # noqa: S102
+
+_tag25, _dir25 = _ns25o["open_study"]("vanilla", None)
+check("G. STUDY_TAG=None mints a tag, creates the directory, and prints a tag that is a valid "
+      "resume tag", os.path.isdir(_dir25) and _ns25o["_STUDY_TAG_RE"].match(_mk25()) is not None)
+
+_okh, _msgh = raises(lambda: _ns25o["open_study"]("vanilla", 20260811 - 231745), ValueError)
+check("H. an UNQUOTED timestamp is a subtraction: it RAISES instead of opening "
+      "runs/vanilla/20029066, which str() used to accept", _okh, _msgh)
+
+_oki, _msgi = raises(lambda: _ns25o["open_study"]("vanilla", "20260101-120000"),
+                     FileNotFoundError)
+check("I. resuming a tag that is not on disk RAISES: makedirs(exist_ok=True) used to open an "
+      "empty study and train the whole sweep into it", _oki, _msgi)
 
 # =============================================================================
 shutil.rmtree(TMP, ignore_errors=True)
