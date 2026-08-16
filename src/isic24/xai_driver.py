@@ -22,7 +22,6 @@ import keras
 from . import paths as _paths
 from . import xai_faithfulness as xf
 from .xai_engines import (
-    LoreCallback,
     MultiModalGradCAMCallback,
     MultiModalGradCAMEngine,
     ShapCallback,
@@ -31,10 +30,9 @@ from .xai_engines import (
 # --------------------------------------------------------------------------------------
 # The load-bearing kwargs.
 #
-# These are the values `make_xai_callbacks` passed, NOT the engines' constructor defaults
-# (LoreCallback's own defaults are every_n_epochs=2 / max_explain_samples=12).  Every
-# published `lore_fidelity` number was produced with the values below; changing one
-# silently makes the artifacts non-comparable.
+# These are the values `make_xai_callbacks` passes, NOT the engines' constructor defaults.
+# Every published number was produced with the values below; changing one silently makes
+# the artifacts non-comparable.
 # --------------------------------------------------------------------------------------
 SHAP_KWARGS = dict(
     background_size=64, max_explain_samples=128,
@@ -58,42 +56,24 @@ GRADCAM_MODES = ("image_only", "context")
 # splitting the batch gives the same result at constant memory. Raise it when the GPU is
 # free, lower it if it still OOMs.
 GRADCAM_BATCH = 16
-# max_explain_samples was 6 -- lore_fidelity was the mean over SIX instances (the same 6
-# for all 110 runs), which is why it saturated at ~0.97-0.98 and could not discriminate
-# between strategies.  Raised to 32.  'random_state' is dropped because the xailib wrapper
-# IGNORES it (LoreEngine sets it on the wrapper instead).
-LORE_KWARGS = dict(
-    max_explain_samples=32, positive_threshold=0.5, top_k=10,
-    every_n_epochs=1, max_samples=256, max_batches=2,
-    lore_config={"neigh_type": "random", "size": 300}, rng_seed=0,
-)
-
 # --------------------------------------------------------------------------------------
-# Which LORE engine `make_xai_callbacks` builds.
-#
-#   "lore_sa" -> `LoreSACallback` + `LoreEngineSA` with LORE_SA_KWARGS. **Default since
-#                2026-07-29**: the legacy `random` neighbourhood produces explanations of
-#                little use (1.7% opposite-class evidence), so the explanations are
-#                regenerated with this one.
-#   "legacy"   -> `LoreCallback` + `LoreEngine` (xailib/lore_explainer). It stays selectable
-#                because it is what produced EVERY `lore_fidelity` in `master_results_*`: it
-#                serves to reproduce those numbers, not to produce new ones.
-#
-# THE CONSEQUENCE NOT TO LOSE. The two engines do NOT explain the same function -- legacy
-# uses a shared image embedding (`images.mean(axis=0)`), `LoreEngineSA` one per sample -- and
-# they do not use the same reportable metric (see below). So the `lore_fidelity` column of
-# the 110 runs stays an artifact of the legacy path: keep it as history, do not compare it
-# row by row with the new numbers.
+# `make_xai_callbacks` builds `LoreSACallback` + `LoreEngineSA` with LORE_SA_KWARGS, and
+# there is no other LORE engine. The one that ran on `xailib` was the default until
+# 2026-07-29 -- its `random` neighbourhood produces explanations of little use, 1.7%
+# opposite-class evidence -- and was removed once the runs it produced had been archived.
+# The two did NOT explain the same function: the old one shared one image embedding across
+# samples (`images.mean(axis=0)`), this one takes one per sample. So the `lore_fidelity`
+# column of the June registry stays an artifact of that path and is never compared row by
+# row with these numbers.
 #
 # WHICH NUMBER TO REPORT. Not `fidelity`: it is `dt.score(Z, Yb)` in-sample, 1.0 by
-# construction on an unpruned tree. That holds for legacy and lore_sa alike. Report:
+# construction on an unpruned tree. Report:
 #   `fid_cv_bacc`               fidelity on held-out folds (the only discriminating one)
 #   `lore_sa_coverage`          fraction of samples with a NON-degenerate neighbourhood
 #   `neigh_unique_frac`, `neigh_pos_rate`   without which the fidelity cannot be read
 # Deletion/insertion do not belong here: they are the metric of tabular SHAP and Grad-CAM,
 # not of LORE, which is a rule surrogate measured by agreement with the black box.
 # --------------------------------------------------------------------------------------
-LORE_ENGINE = "lore_sa"
 
 # Configuration chosen 2026-07-29 by measuring on vanilla seed_47 (n=2 samples):
 # `mutpb=.5` + `init_mutpb=.3` gives 2.9x upstream's diversity, the longest rules (3.0) and
@@ -142,9 +122,7 @@ def _status_key_for(engine):
     if engine == "gradcam":
         return "MultiModalGradCAMCallback"
     if engine == "lore":
-        # The two LORE engines are different callbacks writing to different subdirs: a run
-        # carrying the legacy result must NOT count as done for `lore_sa`.
-        return "LoreSACallback" if LORE_ENGINE == "lore_sa" else "LoreCallback"
+        return "LoreSACallback"
     return engine
 
 
@@ -171,12 +149,6 @@ def _status_key_for(engine):
 CANONICAL_WRITE_GUARD = True
 
 # Everything each engine's callback writes under `run_dir/xai/`, per engine.
-#
-# The two LORE engines write into the SAME `xai/lore/` but in distinct subfolders and CSVs
-# (`epoch*/context` + `lore_fidelity_per_epoch.csv` against `epoch*/tabular_sa` +
-# `lore_sa_per_epoch.csv`). Keeping them separate here is what allows adding the new engine
-# to a run that already has the legacy one WITHOUT `allow_clobber` -- that is, without also
-# opening the door to overwriting the legacy one in the same call.
 def shap_subdir():
     """`shap` o `shap_tab`, secondo che un campione XAI sia adottato o no.
 
@@ -211,17 +183,9 @@ _CLOBBERABLE = {
     "gradcam": {"gradcam":     ("xai/gradcam/epoch_*",),
                 "gradcam_img": ("xai/gradcam_img/gradcam_arrays*_epoch_*.npz",
                                 "xai/gradcam_img/gradcam_summary.csv")},
-    "lore": {
-        "legacy":  ("xai/lore/epoch*/context", "xai/lore/epoch*/tabular_only",
-                    "xai/lore/lore_fidelity_per_epoch.csv"),
-        # 2026-08-01: LORE-SA ha una cartella sua, `xai/lore_sa/`. Prima conviveva col
-        # legacy dentro `xai/lore/` e i due si distinguevano per sottocartella
-        # (`tabular_sa` contro `context`+`tabular_only`); ora li separa il livello sopra,
-        # e il guard non deve piu' guardare dentro `xai/lore/` per questo motore.
-        # I `xai/lore/epoch*/tabular_sa/` delle run di giugno-luglio restano dove sono:
-        # sono artefatti storici e nessuna scrittura nuova puo' finirci sopra.
-        "lore_sa": ("xai/lore_sa/epoch*", "xai/lore_sa/lore_sa_per_epoch.csv"),
-    },
+    # LORE-SA has a folder of its own since 2026-08-01. Whatever the removed engine left
+    # under `xai/lore/` is historical and no new write can land on it.
+    "lore": ("xai/lore_sa/epoch*", "xai/lore_sa/lore_sa_per_epoch.csv"),
     # Not engines of `make_xai_callbacks`: `xai_faithfulness` writes both. They are here
     # because `existing_xai_artifacts` is the only place that knows what a run has already
     # produced, and the faithfulness loop asks it for the same reason the others do.
@@ -235,9 +199,7 @@ def _patterns_for(engine):
     if isinstance(pats, dict):
         if engine == "shap":            # dipendono dal campione adottato
             return pats.get(shap_subdir(), ())
-        if engine == "gradcam":
-            return pats.get(gradcam_subdir(), ())
-        return pats.get(LORE_ENGINE, ())   # 'lore': dipende da quale motore e' selezionato
+        return pats.get(gradcam_subdir(), ())
     return pats
 
 
@@ -369,26 +331,14 @@ def make_xai_callbacks(run_dir, model_name, probe_batch=None, engines=ALL_ENGINE
             batch_size=GRADCAM_BATCH,
             tag=f"{model_name}/GradCAM", **GRADCAM_CB_KWARGS))
     if "lore" in engines:
-        # Cartelle DISTINTE per i due motori (2026-08-01): `xai/lore/` resta del legacy,
-        # LORE-SA ha `xai/lore_sa/`. Prima condividevano `xai/lore/` e si separavano solo
-        # una sottocartella piu' in basso, il che rendeva impossibile leggere dal nome della
-        # directory quale motore avesse prodotto cosa.
-        d = os.path.join(xai_dir, "lore" if LORE_ENGINE == "legacy" else "lore_sa")
+        from .xai_lore_sa import _lore_sa_callback_cls
+        d = os.path.join(xai_dir, "lore_sa")
         os.makedirs(d, exist_ok=True)
-        if LORE_ENGINE == "legacy":
-            out.append(LoreCallback(
-                data_source=ctx.validation_ds, raw_feature_df=ctx.validation_df,
-                feat_cols=ctx.feat_cols, feature_space=ctx.feature_space,
-                base_dir=d, **LORE_KWARGS))
-        elif LORE_ENGINE == "lore_sa":
-            from .xai_lore_sa import _lore_sa_callback_cls
-            out.append(_lore_sa_callback_cls()(
-                data_source=ctx.validation_ds, raw_feature_df=ctx.validation_df,
-                feat_cols=ctx.feat_cols, feature_space=ctx.feature_space,
-                to_feature_dict=ctx.to_feature_dict, training_df=ctx.training_df,
-                base_dir=d, **LORE_SA_KWARGS))
-        else:
-            raise ValueError(f"LORE_ENGINE={LORE_ENGINE!r}: attesi 'legacy' o 'lore_sa'")
+        out.append(_lore_sa_callback_cls()(
+            data_source=ctx.validation_ds, raw_feature_df=ctx.validation_df,
+            feat_cols=ctx.feat_cols, feature_space=ctx.feature_space,
+            to_feature_dict=ctx.to_feature_dict, training_df=ctx.training_df,
+            base_dir=d, **LORE_SA_KWARGS))
     return out
 
 
@@ -444,6 +394,90 @@ def run_xai_on_best_epoch(best_model, xai_callbacks, best_epoch, best_val_auc, r
 # Post-hoc entry points
 # --------------------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------------------
+# FeatureSpace binding -- this checkpoint against the space this session encodes with.
+#
+# Nothing here knows a dataset. The identities are read off the artifacts in play: the run
+# records the space it was trained with (`config.json`), the space reports its own width and
+# adapt state, and the session declares the space it loaded. A reference committed to the
+# repository would have to carry a width, and a width belongs to one dataset only.
+# --------------------------------------------------------------------------------------
+def feature_space_fingerprint(fs):
+    """(encoded width, sha256) of a FeatureSpace's ADAPT STATE.
+
+    Feature order, encoded width, categorical vocabularies and every adapt weight. The
+    width alone cannot identify a space: the adapt is not deterministic, so two spaces of
+    equal width and different statistics encode the same row differently.
+    """
+    import hashlib
+
+    import numpy as np
+
+    h = hashlib.sha256()
+    order = list(fs.features.keys())
+    dim = int(fs.get_encoded_features().shape[-1])
+    h.update(("ORDER:" + "|".join(order)).encode())
+    h.update(f"DIM:{dim}".encode())
+    for name in order:                       # vocabularies are order-sensitive
+        pp = fs.preprocessors.get(name)
+        if hasattr(pp, "get_vocabulary"):
+            h.update(f"VOCAB:{name}:".encode())
+            h.update("|".join(map(str, pp.get_vocabulary())).encode())
+    for w in fs.get_weights():               # normalisation statistics
+        w = np.asarray(w)
+        h.update(str(w.shape).encode())
+        h.update(str(w.dtype).encode())
+        h.update(w.tobytes())
+    return dim, h.hexdigest()
+
+
+def _model_feature_dim(model):
+    """The tabular input width of a checkpoint, read off the model."""
+    for t in getattr(model, "inputs", []):
+        if "features" in (getattr(t, "name", "") or "") and len(t.shape) == 2:
+            return int(t.shape[-1])
+    rank2 = [t for t in getattr(model, "inputs", []) if len(t.shape) == 2]
+    if len(rank2) == 1:                      # the image input is rank 4
+        return int(rank2[0].shape[-1])
+    raise RuntimeError(f"could not locate the tabular input of {model.name}")
+
+
+def assert_fs_matches_model(model, fs, run_id=None):
+    """The last resort: the checkpoint's tabular width against the live encoded width."""
+    mdim, fdim = _model_feature_dim(model), int(fs.get_encoded_features().shape[-1])
+    if mdim != fdim:
+        raise RuntimeError(
+            f"[FS GUARD] {run_id or '<run>'}: the checkpoint expects {mdim} encoded features "
+            f"and this FeatureSpace emits {fdim}. It was not trained with this space.")
+    return mdim
+
+
+def assert_run_feature_space(cfg, run_dir, declared_file, declared_fp=None):
+    """Refuse a checkpoint trained against another FeatureSpace, BEFORE loading it.
+
+    Returns the level the check reached -- ``"fingerprint"``, ``"file"`` or ``"width"`` --
+    so a caller can say what was verified instead of implying more than it checked. A run
+    that records no space falls back to the width, which is all its config affords.
+    """
+    run_file = cfg.get("feature_space_file")
+    if run_file is None:
+        return "width"
+    if run_file != declared_file:
+        raise RuntimeError(
+            f"[FS GUARD] {run_dir}\n  was trained against {run_file}, and this session "
+            f"encodes with {declared_file}.\n  Every number the run produces here would be "
+            f"computed on features it has never seen.")
+    run_fp = cfg.get("feature_space_fingerprint")
+    if run_fp is None or declared_fp is None:
+        return "file"
+    if run_fp != declared_fp:
+        raise RuntimeError(
+            f"[FS GUARD] {run_dir}\n  records the same path but another adapt state:\n"
+            f"  run  {run_fp}\n  live {declared_fp}\n  Same width, different statistics: "
+            f"the encoding differs row by row and nothing else would report it.")
+    return "fingerprint"
+
+
 def load_run_model(run_dir, device=None):
     """Reload a run's best checkpoint together with its recorded best epoch.
 
@@ -465,10 +499,17 @@ def load_run_model(run_dir, device=None):
     cfg_path = os.path.join(run_dir, "config.json")
     cfg = json.load(open(cfg_path)) if os.path.exists(cfg_path) else {}
 
+    # Before the checkpoint reaches memory: a run paired with another FeatureSpace costs
+    # nothing to refuse here and produces silently wrong numbers if it is loaded.
+    ctx = xf._CTX
+    assert_run_feature_space(cfg, run_dir, ctx.feature_space_file,
+                             ctx.feature_space_fingerprint)
+
     import contextlib
     import tensorflow as tf
     with (tf.device(device) if device else contextlib.nullcontext()):
         model = keras.models.load_model(ck[0], compile=False, safe_mode=False)
+    assert_fs_matches_model(model, ctx.feature_space, cfg.get("run_id", run_dir))
     return model, cfg
 
 

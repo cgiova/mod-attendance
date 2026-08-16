@@ -44,6 +44,8 @@ xf.configure(xf.XaiContext(
     feature_space=NB["feature_space"],
     to_feature_dict=NB["_to_feature_dict"],
     encoded_feature_names=NB["encoded_feature_names"],
+    feature_space_file=NB["FEATURE_SPACE_FILE"],
+    feature_space_fingerprint=NB["FEATURE_SPACE_FP"],
 ))
 
 import keras, numpy as np, pandas as pd

@@ -433,12 +433,19 @@ def stability_table(master, art_path, encoded_feature_names, k=TOP_K):
     Two kinds of pair, over the SAME samples:
 
     * ``adjacent_param``  same seed, consecutive settings on the axis -> the weight's effect;
-    * ``same_param_seed`` same setting, different seeds -> **the seed noise**.
+    * ``same_param_seed`` same setting, every pair of seeds -> **the seed noise**.
 
     Without the second, "Stability@5 = 0.6 between alpha=0.5 and alpha=0.625" is not
     interpretable: it could be initialization noise entirely. The number that matters is the
     difference between the two, which is why the null is computed here and not "later, if
     needed".
+
+    The unit of INFERENCE over this table is the seed and not the row -- `seed_level_contrast`
+    -- which is why the null takes the COMPLETE set of seed pairs and not the consecutive ones
+    only: reduced by seed, a null built on consecutive pairs gives the two extreme seeds one
+    pair each and the middle ones two, so how well a seed's null is estimated would depend on
+    where its number falls in a sort, which means nothing. The top-k sets are cached per run,
+    so the extra pairs cost set operations and no I/O.
 
     NB `lam0e+00` stays on the axis ordered by VALUE (0 < 1e-5): no logarithm is taken, but
     the spacing between pairs is very uneven and the `param_a`/`param_b` columns make that
@@ -480,7 +487,9 @@ def stability_table(master, art_path, encoded_feature_names, k=TOP_K):
                     A, B = topk(ra.run_dir_abs), topk(rb.run_dir_abs)
                     if A is None or B is None:
                         continue
-                    rows.append(dict(impl_name=impl, pair_kind="adjacent_param", seed=seed,
+                    rows.append(dict(impl_name=impl, pair_kind="adjacent_param",
+                                     seed_a=seed, seed_b=seed,
+                                     run_id_a=ra.run_id, run_id_b=rb.run_id,
                                      tag_a=ra.setting_tag, tag_b=rb.setting_tag,
                                      param_a=ra.param, param_b=rb.param,
                                      stability_at_k=_jaccard_runs(A, B), k=k))
@@ -492,15 +501,75 @@ def stability_table(master, art_path, encoded_feature_names, k=TOP_K):
         for tag, gt in grp.groupby("setting_tag"):
             if xs.is_ablation(impl, tag):
                 continue
-            gt = gt.sort_values("seed")
-            for (_, ra), (_, rb) in zip(gt.iloc[:-1].iterrows(), gt.iloc[1:].iterrows()):
-                A, B = topk(ra.run_dir_abs), topk(rb.run_dir_abs)
-                if A is None or B is None:
-                    continue
-                rows.append(dict(impl_name=impl, pair_kind="same_param_seed",
-                                 seed=f"{ra.seed}->{rb.seed}", tag_a=tag, tag_b=tag,
-                                 param_a=ra.param, param_b=rb.param,
-                                 stability_at_k=_jaccard_runs(A, B), k=k))
+            gt = list(gt.sort_values("seed").itertuples())
+            for i, ra in enumerate(gt):
+                for rb in gt[i + 1:]:
+                    A, B = topk(ra.run_dir_abs), topk(rb.run_dir_abs)
+                    if A is None or B is None:
+                        continue
+                    rows.append(dict(impl_name=impl, pair_kind="same_param_seed",
+                                     seed_a=ra.seed, seed_b=rb.seed,
+                                     run_id_a=ra.run_id, run_id_b=rb.run_id,
+                                     tag_a=tag, tag_b=tag,
+                                     param_a=ra.param, param_b=rb.param,
+                                     stability_at_k=_jaccard_runs(A, B), k=k))
+    return pd.DataFrame(rows)
+
+
+# --------------------------------------------------------------------------------------
+# Inference over a pair table — the unit is the SEED, not the pair
+# --------------------------------------------------------------------------------------
+def seed_level_contrast(pairs, value_col, effect_kind, null_kind, by=None):
+    """The effect arm against its null, reduced to one value per seed before any test.
+
+    A table of run pairs is a graph: the runs are the nodes and the pairs are the edges, so
+    a test over its rows counts a model once for every neighbour it has. On the canonical
+    grid that turns six seeds into some thirty-five rows per arm, and the p-value then
+    reports an n that does not exist — the same error as pooling samples inside a run, one
+    level up.
+
+    The two arms do not reduce the same way, and the asymmetry is structural rather than an
+    inconvenience to hide: an effect pair lives INSIDE one seed, a null pair spans two. A
+    seed's effect is therefore the mean over its own pairs, its null the mean over the pairs
+    that TOUCH it, so every null pair counts for both of its seeds and the null values stay
+    correlated across seeds. The reduction fixes the count, not that correlation, and the
+    correlation is what keeps this a paired test between two arms rather than a comparison of
+    two independent groups.
+
+    The test is `xs.across_runs` over the per-seed differences `effect - null`, and `p_floor`
+    is the smallest p that many seeds allow: with six it is 0.031, and no effect size reaches
+    below it. The spreads returned are across seeds, which is the level the test works at; the
+    spread across pair rows describes the table and cannot be read as uncertainty.
+    """
+    from . import xai_subset as xs
+
+    p = pairs[pairs.pair_kind.isin((effect_kind, null_kind))]
+    span = p[(p.pair_kind == effect_kind) & (p.seed_a != p.seed_b)]
+    if len(span):
+        raise RuntimeError(
+            f"[SEED UNIT] {len(span)} '{effect_kind}' pairs span two seeds: the arm does not "
+            "reduce to one value per seed, and pairing it against the null is undefined.")
+
+    rows, no_effect = [], []
+    for key, g in ([(None, p)] if by is None else p.groupby(by)):
+        e = g[g.pair_kind == effect_kind].groupby("seed_a")[value_col].mean()
+        u = g[g.pair_kind == null_kind]
+        n = pd.concat([u.set_index("seed_a")[value_col],
+                       u.set_index("seed_b")[value_col]]).groupby(level=0).mean()
+        seeds = sorted(set(e.index) & set(n.index))
+        if not seeds:
+            no_effect.append(str(key))
+            continue
+        ev, nv = e.loc[seeds].to_numpy(float), n.loc[seeds].to_numpy(float)
+        res = xs.across_runs(nv, ev, name_a=null_kind, name_b=effect_kind)
+        rows.append(dict({by: key} if by else {}, n_seeds=len(seeds),
+                         effect_mean=float(ev.mean()), effect_sd=float(ev.std(ddof=1)),
+                         null_mean=float(nv.mean()), null_sd=float(nv.std(ddof=1)),
+                         diff_mean=res["diff_mean"], n_positive=res["n_positive"],
+                         sign_p=res["sign_p"], wilcoxon_p=res["wilcoxon_p"],
+                         p_floor=res["p_floor"]))
+    if no_effect:
+        print(f"  [seed unit] no '{effect_kind}' arm, so no contrast: {', '.join(no_effect)}")
     return pd.DataFrame(rows)
 
 
@@ -817,7 +886,9 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
 
     The effect and its null are the same kind of number: cross-family pairs (two families,
     one seed) against seed pairs (one family, two seeds), over the same lesions, with the
-    run PAIR as the unit — one median IoU per pair, not one per lesion.
+    run PAIR as the unit — one median IoU per pair, not one per lesion. That unit describes
+    the table; the unit the two arms are TESTED at is the seed, in `seed_level_contrast`,
+    because a run enters as many pairs as it has partners.
 
     Two binarizations are carried side by side because a 6x6 map quantizes any overlap
     heavily and a single rule would not show it: `cam_masks` (half of each map's range,

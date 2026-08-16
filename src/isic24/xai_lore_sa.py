@@ -19,9 +19,10 @@ Two further inefficiencies were OURS and are fixed here by construction:
   * `lore_config['size']` never reached the generator -- `xailib`'s wrapper hardcodes
     `explain_instance(x, samples=1000)`.  Here the budget is a real argument.
 
-The legacy `LoreEngine` stays in `xai_engines` and remains the reference: it is what
-produced every published `lore_fidelity`.  This engine is for measurement, and its
-numbers are NOT interchangeable with the published ones.
+The engine that ran on `xailib` was removed on 2026-08-14, together with its dependency:
+it had not been the default since 2026-07-29 and the `lore_fidelity` it produced belongs to
+the June registry, which is archived. Its numbers were never interchangeable with these --
+it shared one image embedding across samples, this one takes one per sample.
 """
 
 from __future__ import annotations
@@ -328,10 +329,15 @@ class LoreEngineSA:
 
         ``audit``: swap in the surrogate that also reports a non-in-sample fidelity.  On
         by default because `fidelity` alone is 1.0 by construction and reads as a result.
+
+        ``training_df``: the reference population -- the rows the neighbourhood generator
+        draws from, and the frame the categorical dtypes are read off.  It must be the
+        training set: see :meth:`explain`.
         """
         self.feature_space = feature_space
         self.feat_cols = list(feat_cols)
         self.to_feature_dict = to_feature_dict
+        self.training_df = training_df
         self.cat_cols = [c for c in self.feat_cols
                          if not pd.api.types.is_numeric_dtype(training_df[c])]
         self.neigh_type = neigh_type
@@ -380,7 +386,13 @@ class LoreEngineSA:
         """Explain the first `max_explain_samples` rows; returns (stats, per-sample rows)."""
         img_enc, head_fn = _split_image_head(model)
         embs = img_enc.predict(imgs, batch_size=32, verbose=0)
-        dataset = self._make_dataset(raw_df, labels)
+        # The neighbourhood is drawn from the TRAINING rows. `lore_sa` reads its descriptor
+        # off this frame -- `uniform(min, max)` per numeric feature, the distinct levels per
+        # categorical one -- and `ColumnTransformerEnc` builds the encoded space from it.
+        # Handed the rows being explained, the neighbourhood was a resample of those few
+        # lesions: the box was their own min/max, and a level none of them carried could not
+        # be generated at all, nor even exist as a column of the surrogate.
+        dataset = self._make_dataset(self.training_df, self.training_df["target"])
 
         rows = []
         n = min(max_explain_samples, len(raw_df))
@@ -462,25 +474,14 @@ class LoreEngineSA:
 
 
 # --------------------------------------------------------------------------------------
-# Callback -- l'aggancio alla pipeline
-#
-# Fino al 2026-07-29 questo motore era raggiungibile solo dai benchmark: `make_xai_callbacks`
-# costruiva sempre il `LoreCallback` legacy, quindi la configurazione scelta misurando non
-# arrivava a nessun artefatto.  Questo callback ha la stessa forma di quello legacy (stesso
-# `base_dir`, stesso `epoch{NNN}/` per epoca, stesso `lore_fidelity_per_epoch.csv` con dedupe
-# via `append_epoch_row`) cosi' i due percorsi si possono confrontare senza riscrivere nulla
-# a valle.
-#
-# NON sostituisce il legacy di default: ogni `lore_fidelity` pubblicato viene da li', e i due
-# motori non spiegano la stessa funzione (embedding immagine condiviso vs per-campione).
-# La scelta si fa con `xai_driver.LORE_ENGINE`.
+# Callback -- the hook into the pipeline. It is the only LORE `make_xai_callbacks` builds.
 # --------------------------------------------------------------------------------------
 
 def _lore_sa_callback_cls():
     import keras
 
     class LoreSACallback(keras.callbacks.Callback):
-        """`LoreEngineSA` guidato come il `LoreCallback` legacy, sugli stessi percorsi."""
+        """`LoreEngineSA` driven per epoch, writing `epoch{NNN}/` under its own base dir."""
 
         def __init__(self, data_source, raw_feature_df, feat_cols, feature_space,
                      to_feature_dict, training_df, base_dir, max_explain_samples=32,

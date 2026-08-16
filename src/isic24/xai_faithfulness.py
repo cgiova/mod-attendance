@@ -35,7 +35,7 @@ from .xai_engines import _finalize_plot, encoded_indices_for_raw
 
 @dataclass
 class XaiContext:
-    """The seven notebook objects the faithfulness code used to read from globals.
+    """The notebook state the faithfulness code used to read from globals.
 
     ``validation_df``/``validation_ds`` must stay in the SAME order: the tabular
     perturbation aligns encoded batches to raw rows positionally
@@ -48,6 +48,12 @@ class XaiContext:
     feature_space: Any
     to_feature_dict: Callable
     encoded_feature_names: Sequence[str]
+    # WHICH space, and WHICH adapt state: the file as the runs record it (relative to the
+    # artifacts root, so it names no dataset) and the fingerprint of the space in memory.
+    # `load_run_model` refuses a checkpoint that declares another one. No default: a space
+    # nobody declared is the silent pairing this exists to make impossible.
+    feature_space_file: str
+    feature_space_fingerprint: str
 
 
 class _Unconfigured:
@@ -840,6 +846,9 @@ def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
     need_img = ("image" in methods) or ("joint" in methods)
 
     raw_df, imgs, labs = _build_faith_subset(subset_idx=subset_idx)
+    # The rows this call explains: `_build_faith_subset` has already refused a session with no
+    # adopted sample, so there is always a population to name in the artifact.
+    eff_subset = np.asarray(subset_idx if subset_idx is not None else FAITH_SUBSET_IDX, int)
     tab_imp = None
     if need_tab:
         if tab_imp_override is not None:
@@ -850,6 +859,7 @@ def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
             sv, ei = _load_shap_values(run_dir, best_epoch, model, raw_df, imgs)
             raw_df = raw_df.iloc[ei].reset_index(drop=True)
             imgs, labs = imgs[ei], labs[ei]
+            eff_subset = eff_subset[ei]      # explained rows, not the whole adopted sample
             tab_imp = _persample_raw_importance(sv)[:len(raw_df)]
     n = len(raw_df)
     n_raw = len(_CTX.feat_cols)
@@ -953,13 +963,14 @@ def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
         os.makedirs(fdir, exist_ok=True)
         # The sample stamped inside the artifact itself: an npz without these keys is from the
         # historical prefix, and there is no other way to tell them apart afterwards.
-        _eff_subset = subset_idx if subset_idx is not None else FAITH_SUBSET_IDX
+        from . import xai_subset as _xs
+        assert len(eff_subset) == n, (
+            f"the artifact would name {len(eff_subset)} rows over curves of {n}: the stamp must "
+            f"be the population the curves hold")
         results["subset_fingerprint"] = ACTIVE_SUBSET_FINGERPRINT
-        results["n_subset"] = int(len(_eff_subset)) if _eff_subset is not None else None
-        if _eff_subset is not None:
-            from . import xai_subset as _xs
-            npz["val_index"] = np.asarray(_eff_subset, int)
-            npz.update(_xs.stamp_row_ids(_eff_subset))
+        results["n_subset"] = int(len(eff_subset))
+        npz["val_index"] = eff_subset
+        npz.update(_xs.stamp_row_ids(eff_subset))
         np.savez_compressed(os.path.join(fdir, f"{out_name}_curves.npz"), **npz)
         with open(os.path.join(fdir, f"{out_name}.json"), "w") as f:
             json.dump({**results, "curves": curves_json, "q_grid": q_grid.tolist()}, f, indent=2)
@@ -1050,7 +1061,7 @@ def _find_gap_layer(model):
 
 
 def aligned_tab_attributions(model, raw_df, imgs, background="baseline", bg_size=100,
-                             bg_seed=0, max_evals=None, verbose=False):
+                             bg_seed=0, max_evals=None, perm_seed=0, verbose=False):
     """Per-sample SIGNED attributions over the raw features, aligned to the deletion test.
 
     ``background``:
@@ -1061,6 +1072,13 @@ def aligned_tab_attributions(model, raw_df, imgs, background="baseline", bg_size
         ``sum_i phi_i = logit(p(x)) - logit(p(baseline))``.
       * ``"training"`` -- `bg_size` rows sampled from training.  This is what produced the
         already-published `faithfulness_aligned_attr.csv`; kept as the robustness variant.
+
+    ``perm_seed``: the permutation draw. ``max_evals = 2d+1`` buys ONE antithetic
+    permutation, and with interactions in the tabular branch the estimate depends on the
+    order it draws -- so the order is fixed here and is the SAME for every model, which is
+    what makes a contrast between runs paired on the estimator as well as on the lesions.
+    It varies per sample (``perm_seed + i``) so that a single order cannot bias the mean
+    over the sample in one direction.
 
     Returns ``(phi, meta)`` with ``phi`` of shape ``(n_samples, n_raw_features)``.
     """
@@ -1128,16 +1146,23 @@ def aligned_tab_attributions(model, raw_df, imgs, background="baseline", bg_size
     BG = encode(bg_raw)
     max_evals = max_evals or (ALIGNED_MAX_EVALS_PER_FEATURE * n_feat + 1)
 
+    # `shap.explainers.Permutation.__init__` calls `np.random.seed(seed)` unconditionally,
+    # once per construction: with `seed=None` it reseeds numpy's GLOBAL generator from OS
+    # entropy, so each run drew its own permutation and left the process reseeded behind it.
+    # The seed is passed, and the state the explainer overwrites is put back.
+    np_state = np.random.get_state()
     phi = np.zeros((len(raw_df), n_feat), dtype=np.float64)
     for i in range(len(raw_df)):
-        ex = shap.explainers.Permutation(make_f(embs[i]), BG)
+        ex = shap.explainers.Permutation(make_f(embs[i]), BG, seed=perm_seed + i)
         sv = ex(X[i:i + 1], max_evals=max_evals, silent=True)
         phi[i] = np.asarray(sv.values).reshape(-1)          # SIGNED, no np.abs here
         if verbose and (i + 1) % 32 == 0:
             print(f"    aligned attributions {i+1}/{len(raw_df)}", flush=True)
+    np.random.set_state(np_state)
 
     meta = {"background": background, "bg_rows": int(len(bg_raw)),
-            "max_evals": int(max_evals), "score_space": "logit",
+            "max_evals": int(max_evals), "perm_seed": int(perm_seed),
+            "n_permutations": int(max_evals // (2 * n_feat + 1)), "score_space": "logit",
             "n_features": n_feat, "signed": True}
     return phi, meta
 

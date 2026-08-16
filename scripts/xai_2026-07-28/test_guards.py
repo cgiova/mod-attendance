@@ -13,6 +13,7 @@ Case C is what turns a test from "it runs" into "it proves I am measuring the fi
 Usage:  python scripts/xai_2026-07-28/test_guards.py
 No GPU, no checkpoint: artifacts are only needed where stated.
 """
+import inspect as _inspect28
 import os
 import shutil
 import sys
@@ -79,7 +80,8 @@ run_diff = make_shap_run("s_c", np.arange(500, 500 + N))
 
 
 def stability(dirs):
-    m = pd.DataFrame([dict(impl_name="fixed_scaling", setting_tag=t, seed=47, run_dir=p)
+    m = pd.DataFrame([dict(impl_name="fixed_scaling", setting_tag=t, seed=47,
+                           run_id=f"r_{t}", run_dir=p)
                       for t, p in zip(("a0p250", "a0p500"), dirs)])
     return xmet.stability_table(m, "/", NAMES)
 
@@ -231,6 +233,23 @@ check("C. n beyond what is available -> raises", ok, msg)
 ok, msg = raises(lambda: xs.unique_lesion_subset(ids, y[:10], n=10, seed=0), exc=ValueError)
 check("D. ids/labels of different length -> raises", ok, msg)
 
+# The LORE subset: one definition, and the prefix it replaces. `unique_lesion_subset` keeps
+# the first occurrence of each lesion, so in the real sample the positives sit at the front.
+_yL = np.array([1] * 40 + [0] * 60)
+_sampL = np.arange(100)
+_loreL = xs.lore_subset(_yL, _sampL, 20)
+check("E. lore_subset is half per class, distinct, and inside the adopted sample",
+      len(_loreL) == 20 and int(_yL[_loreL].sum()) == 10
+      and len(set(_loreL)) == 20 and set(_loreL) <= set(_sampL),
+      f"{int(_yL[_loreL].sum())} pos / {20 - int(_yL[_loreL].sum())} neg")
+check("F. the prefix definition it replaces stays SILENT on the same sample: 20 positives, "
+      "no negative, and a different set of rows",
+      int(_yL[_sampL[:20]].sum()) == 20 and set(_sampL[:20]) != set(_loreL),
+      f"{len(set(_sampL[:20]) & set(_loreL))}/20 rows in common")
+ok, msg = raises(lambda: xs.lore_subset(_yL, _sampL, 100), exc=ValueError)
+check("G. a class too small to fill half the subset -> raises, instead of returning fewer",
+      ok, msg)
+
 # ======================================================================== 7 ===
 section("7. across_runs — the unit is the run, and ties must be DECLARED")
 ok, msg = raises(lambda: xs.across_runs([1, 2, 3], [1, 2]), exc=ValueError)
@@ -255,15 +274,45 @@ check("E. unknown mode -> raises", ok, msg)
 
 # ======================================================================== 9 ===
 section("9. Populations: do the cross-run globs pick up SUPERSEDED runs?")
+import glob as _g                                                 # noqa: E402
+
+# The property is about the PATTERN, so it is measured on a tree built here. Read off the
+# live artifacts it was silently conditional on superseded runs still lying in `runs/`, and
+# it stopped holding the day they were archived — a guard that a cleanup can switch off was
+# never guarding the glob.
+_LORE9 = "lore_sa_per_epoch.csv"
+_r9 = os.path.join(TMP, "pop9", "runs")
+os.makedirs(os.path.join(_r9, "vanilla", "20260812-000000", "seed_8", "baseline__e20",
+                         "xai", "lore_sa"), exist_ok=True)
+os.makedirs(os.path.join(_r9, "_robustness", "stage1_lore", "20260604-210304"), exist_ok=True)
+open(os.path.join(_r9, "vanilla", "20260812-000000", "seed_8", "baseline__e20",
+                  "xai", "lore_sa", _LORE9), "w").close()
+open(os.path.join(_r9, "_robustness", "stage1_lore", "20260604-210304", _LORE9), "w").close()
+_canon9 = _g.glob(f"{_r9}/*/*/*/*/xai/lore_sa/{_LORE9}")
+_all9 = _g.glob(f"{_r9}/**/{_LORE9}", recursive=True)
+check("A. a naive glob on lore_sa_per_epoch picks up MORE than the canonical ones",
+      len(_all9) == len(_canon9) + 1 and len(_canon9) == 1,
+      f"{len(_all9)} total vs {len(_canon9)} under xai/lore_sa/ — filter on the path")
+
 if os.path.isdir(os.path.join(ART, "runs")):
-    import glob as _g
-    canon_lore = _g.glob(f"{ART}/runs/*/*/*/*/xai/lore_sa/lore_sa_per_epoch.csv")
-    all_lore = _g.glob(f"{ART}/runs/**/lore_sa_per_epoch.csv", recursive=True)
-    check("A. a naive glob on lore_sa_per_epoch picks up MORE than the canonical ones",
-          len(all_lore) > len(canon_lore),
-          f"{len(all_lore)} total vs {len(canon_lore)} under xai/lore_sa/ — filter on the path")
+    canon_lore = _g.glob(f"{ART}/runs/*/*/*/*/xai/lore_sa/{_LORE9}")
+    all_lore = _g.glob(f"{ART}/runs/**/{_LORE9}", recursive=True)
+    check("A2. and on the live tree the two agree: no superseded LORE artifact is left "
+          "under runs/ for the naive one to find",
+          len(all_lore) == len(canon_lore),
+          f"{len(all_lore)} total, {len(canon_lore)} canonical")
     master = pd.read_csv(os.path.join(ART, "summaries", "master_results_rows.csv"))
-    check("B. the canonical registry holds 110 runs", len(master) == 110, f"{len(master)}")
+    # Not a fixed count: a registry is stale exactly when it names runs that are not there,
+    # or when the studies it names hold runs it never registered.
+    _rd9 = [xs.run_dir_abs(p, ART) for p in master.run_dir]
+    _gone9 = [p for p in _rd9 if not os.path.isdir(p)]
+    _studies9 = sorted({os.path.dirname(os.path.dirname(p)) for p in _rd9})
+    _disk9 = sum(len(_g.glob(os.path.join(s, "*", "*", "single_run_summary.csv")))
+                 for s in _studies9)
+    check("B. the registry is the population on disk: every run it names exists, and the "
+          "studies it names hold no run it leaves out",
+          not _gone9 and _disk9 == len(master),
+          f"{len(master)} runs over {len(_studies9)} studies, {len(_gone9)} missing")
     cf = os.path.join(ART, "runs", "_faithfulness", "combined_faithfulness.csv")
     if os.path.exists(cf):
         n = len(pd.read_csv(cf))
@@ -1241,6 +1290,801 @@ _oki, _msgi = raises(lambda: _ns25o["open_study"]("vanilla", "20260101-120000"),
                      FileNotFoundError)
 check("I. resuming a tag that is not on disk RAISES: makedirs(exist_ok=True) used to open an "
       "empty study and train the whole sweep into it", _oki, _msgi)
+
+# ======================================================================= 26 ===
+section("26. THE REGISTRY — a summary the others do not carry never enters it")
+# The registry decides which runs every post-hoc loop sees. Its source used to be the
+# study-level `combined_summary.csv`, an aggregate: one of the canonical five is written
+# with padded headers, and pandas reads `" seed"` and `"impl_name        "` as columns of
+# their own — the family lands in the registry with NaN keys and vanishes from the groupby.
+from isic24 import xai_subset as xs26                            # noqa: E402
+
+_ROOT26 = os.path.join(TMP, "registry")
+_COLS26 = list(xs26.REGISTRY_COLS)
+
+
+def _run26(study, impl, seed, tag, padded=False):
+    """One run on disk: its own summary, in the schema the runner writes."""
+    rd = os.path.join(study, f"seed_{seed}", f"{tag}__e20")
+    os.makedirs(rd, exist_ok=True)
+    row = dict(impl_name=impl, exp_tag=os.path.basename(study), setting_tag=tag,
+               run_id=f"{os.path.basename(study)}/seed_{seed}__{tag}__e20", seed=seed,
+               best_epoch=3, best_val_auc=0.9, run_dir=rd, model_name=f"{impl}__{tag}")
+    if padded:                       # the real defect: `to_csv` after a formatted read
+        with open(os.path.join(rd, "single_run_summary.csv"), "w") as fh:
+            fh.write(", ".join(f"{c:<18}" for c in _COLS26) + "\n")
+            fh.write(", ".join(f"{str(row[c]):<18}" for c in _COLS26) + "\n")
+    else:
+        pd.DataFrame([row]).to_csv(os.path.join(rd, "single_run_summary.csv"), index=False)
+    return row
+
+
+_studies26 = {}
+for _impl26, _padded26 in (("vanilla", False), ("learnable_scaling", True)):
+    _st26 = os.path.join(_ROOT26, _impl26, "20260101-000000")
+    _rows26 = [_run26(_st26, _impl26, 8, "baseline", padded=_padded26)]
+    _studies26[_impl26] = _st26
+    # the study-level aggregate the OLD registry read, padded exactly like the per-run one
+    with open(os.path.join(_st26, "combined_summary.csv"), "w") as _fh26:
+        _w26 = (lambda v: f"{v:<18}") if _padded26 else str
+        _fh26.write(",".join(_w26(c) for c in _COLS26) + "\n")
+        for _r26 in _rows26:
+            _fh26.write(",".join(_w26(str(_r26[c])) for c in _COLS26) + "\n")
+
+_okA26, _msgA26 = raises(lambda: xs26.build_registry(_studies26))
+check("A. a per-run summary with padded headers RAISES: `\" seed\"` is not `seed`, and the "
+      "run enters the registry with NaN keys", _okA26, _msgA26)
+
+_clean26 = {"vanilla": _studies26["vanilla"]}
+_reg26 = xs26.build_registry(_clean26, n_expected=1)
+check("B. the clean study builds: one row per run, every registry column present",
+      len(_reg26) == 1 and not [c for c in _COLS26 if c not in _reg26.columns],
+      f"{_reg26.shape} columns ok")
+
+# C. the OLD source on case A: concat of the study aggregates, exactly as @@MASTER_TABLE@@ did.
+_old26 = pd.concat([pd.read_csv(os.path.join(d, "combined_summary.csv")).assign(impl_name=i)
+                    for i, d in _studies26.items()], ignore_index=True)
+_seen26 = set(_old26.groupby("impl_name")[["best_val_auc"]].mean().index)
+check("C. the OLD code stays silent on the same defect: it concatenates, and the padded "
+      "family reaches the aggregate with setting_tag/run_dir at NaN",
+      len(_old26) == 2 and _old26.setting_tag.isna().sum() == 1
+      and _old26.run_dir.isna().sum() == 1,
+      f"families in the groupby: {sorted(_seen26)}")
+
+_empty26 = os.path.join(_ROOT26, "controlled_fusion", "20260101-000000")
+os.makedirs(_empty26, exist_ok=True)
+_okD26, _msgD26 = raises(lambda: xs26.build_registry({**_clean26,
+                                                      "controlled_fusion": _empty26}))
+check("D. a study with no run RAISES instead of dropping its family out of the registry",
+      _okD26, _msgD26)
+
+_okE26, _msgE26 = raises(lambda: xs26.build_registry(_clean26, n_expected=132))
+check("E. a run count below the declared one RAISES, naming the count per family",
+      _okE26, _msgE26)
+
+_wrong26 = os.path.join(_ROOT26, "adaptive_gating", "20260101-000000")
+_run26(_wrong26, "vanilla", 8, "base")
+_okF26, _msgF26 = raises(lambda: xs26.build_registry({"adaptive_gating": _wrong26}))
+check("F. a run filed under another family's study RAISES: the study directory is not "
+      "evidence of what the run is", _okF26, _msgF26)
+
+# ======================================================================= 27 ===
+section("27. POST-HOC CONTRACT — the properties that live only in notebook cells")
+# The counterpart of section 15 for the post-hoc notebook: who is explained and who is
+# stamped as done are cell-level facts, and no module can hold them.
+import json as _js27                                              # noqa: E402
+
+_NB27 = _notebook15("FAITH_LOOP")
+_cells27 = [''.join(c["source"]) for c in _js27.load(open(_NB27))["cells"]
+            if c["cell_type"] == "code"]
+_text27 = "\n".join(_cells27)
+
+
+def _cell27(marker):
+    """The one cell whose header starts with this marker, numbering included, or ''."""
+    hits = [c for c in _cells27 if c.startswith(f"# @@{marker}")]
+    return hits[0] if len(hits) == 1 else ""
+
+
+_c2, _c4 = _cell27("SUBSET@@ 2/4"), _cell27("SUBSET@@ 4/4")
+check("A. PH-15: the LORE subset has ONE definition — the two producers call xs.lore_subset, "
+      "neither builds an index of its own, and @@SHAPE@@ no longer guesses one",
+      _text27.count("xs.lore_subset(") == 2
+      and "xs.lore_subset(" in _c2 and "xs.lore_subset(" in _c4
+      and "np.linspace(" not in _c2 + _c4 and "LORE_IDX_BY_N" not in _text27,
+      f"{_text27.count('xs.lore_subset(')} call sites, no local construction")
+
+check("B. PH-05: a failed engine is never stamped as done — the result is inspected and the "
+      "run is skipped before mark_done",
+      '!= "ok"' in _c4 and _c4.find("[FAIL]") < _c4.find("xs.mark_done"),
+      "the failure path continues before the stamp")
+
+# ======================================================================= 28 ===
+section("28. LORE reference pool — the neighbourhood is drawn from the TRAINING rows")
+# `lore_sa` generates a neighbour by sampling `uniform(min, max)` per numeric feature and a
+# level per categorical one, both read off the descriptor of the dataset it is handed. Handed
+# the rows being explained, it can only resample their own box.
+try:
+    from isic24.xai_lore_sa import LoreEngineSA as _LE28                # noqa: E402
+
+    _tr28 = pd.DataFrame({"x": np.linspace(0.0, 100.0, 200),
+                          "site": ["A", "B", "C", "D"] * 50,
+                          "target": [0, 1] * 100})
+    _expl28 = _tr28[(_tr28.x >= 40) & (_tr28.x <= 45) & (_tr28.site == "A")]
+    _eng28 = _LE28(feature_space=None, feat_cols=["x", "site"], to_feature_dict=None,
+                   training_df=_tr28)
+
+    _ref28 = _eng28._make_dataset(_eng28.training_df, _eng28.training_df["target"])
+    _num28, _cat28 = _ref28.descriptor["numeric"]["x"], _ref28.descriptor["categorical"]["site"]
+    check("A. the reference descriptor is the training population: the full numeric range and "
+          "every level",
+          _num28["min"] == 0.0 and _num28["max"] == 100.0
+          and set(_cat28["distinct_values"]) == set("ABCD"),
+          f"x in [{_num28['min']:.0f}, {_num28['max']:.0f}], levels "
+          f"{sorted(_cat28['distinct_values'])}")
+
+    _old28 = _eng28._make_dataset(_expl28, _expl28["target"])
+    _on28, _oc28 = _old28.descriptor["numeric"]["x"], _old28.descriptor["categorical"]["site"]
+    check("B. the explained rows as the reference stay SILENT and box the neighbourhood in: "
+          "a level they do not carry cannot be generated, nor exist as a column",
+          _on28["max"] - _on28["min"] < 10.0 and set(_oc28["distinct_values"]) == {"A"},
+          f"x in [{_on28['min']:.1f}, {_on28['max']:.1f}], levels "
+          f"{sorted(_oc28['distinct_values'])}")
+
+    _src28 = _inspect28.getsource(_LE28.explain)
+    check("C. explain() builds it from the training frame, not from the rows it explains",
+          "self._make_dataset(self.training_df" in _src28
+          and "_make_dataset(raw_df" not in _src28)
+except ImportError as _e28:                                             # noqa: BLE001
+    print(f"  (lore_sa unavailable: section skipped — {_e28})")
+
+# ======================================================================= 29 ===
+section("29. ALIGNED ATTRIBUTOR — one permutation, drawn the same way for every model")
+# `max_evals = 2d+1` buys a single antithetic permutation. That is a budget decision, but the
+# DRAW must not be free: `shap.explainers.Permutation` reseeds numpy's global generator at
+# every construction, so without a seed each run ranked with its own order and left the
+# process reseeded from entropy behind it.
+try:
+    import shap as _shap29                                            # noqa: E402
+    from isic24 import xai_faithfulness as _xf29                      # noqa: E402
+
+    # A THREE-way interaction. A pairwise one is not enough: the antithetic pair averages the
+    # two orders of a couple exactly, so any permutation returns the exact Shapley value and
+    # the case cannot fail. Order-dependence starts where a term needs three features at once.
+    def _f29(X):
+        X = np.atleast_2d(X)
+        return X[:, 0] + 2.0 * X[:, 1] * X[:, 2] * X[:, 3]
+
+    _bg29 = np.zeros((1, 4))
+    _x29 = np.array([[1.0, 2.0, 1.5, 2.5]])
+    _ev29 = 2 * 4 + 1
+
+    def _phi29(seed):
+        return np.asarray(_shap29.explainers.Permutation(_f29, _bg29, seed=seed)(
+            _x29, max_evals=_ev29, silent=True).values).reshape(-1)
+
+    check("A. the same seed gives the same attributions",
+          np.allclose(_phi29(7), _phi29(7)), "reproducible")
+
+    _phis29 = np.array([_phi29(s) for s in range(8)])
+    check("B. the draw moves them: one antithetic permutation IS order-dependent, which is why "
+          "it cannot be left to chance",
+          len(np.unique(_phis29.round(6), axis=0)) > 1,
+          f"{len(np.unique(_phis29.round(6), axis=0))} distinct attributions over 8 seeds, "
+          f"spread {(_phis29.max(0) - _phis29.min(0)).max():.3f}")
+    check("E. and efficiency holds all the same: the marginals telescope along ANY single "
+          "permutation, so the check that could have caught this is silent by construction",
+          np.abs(_phis29.sum(1) - (_f29(_x29)[0] - _f29(_bg29)[0])).max() < 1e-9,
+          "sum(phi) = f(x) - f(baseline) for every draw")
+
+    np.random.seed(123)
+    _st29 = np.random.get_state()[1][:4].copy()
+    _shap29.explainers.Permutation(_f29, _bg29)
+    check("C. constructed without a seed it RESEEDS the global generator, silently — the old "
+          "call site did this once per sample",
+          not np.array_equal(np.random.get_state()[1][:4], _st29), "global state moved")
+
+    _src29 = _inspect28.getsource(_xf29.aligned_tab_attributions)
+    check("D. the call site passes the seed and puts the global state back",
+          "seed=perm_seed + i" in _src29 and "np.random.set_state(np_state)" in _src29)
+except ImportError as _e29:                                            # noqa: BLE001
+    print(f"  (shap unavailable: section skipped — {_e29})")
+
+# ======================================================================= 30 ===
+section("30. LOGIT DECOMPOSITION — the cached table is checked against the rows asked for")
+# `decompose_run` caches its per-sample table inside the run folder, and a folder name carries
+# no population: a table computed on another sample is reused under the same path, and the
+# aggregate then spans two populations with `n_samples` as its only trace.
+from isic24 import xai_logit as _xlog                                   # noqa: E402
+
+
+def _cached30(tag, val_index, root=TMP):
+    """A run folder holding only the per-sample table, no checkpoint: loading one would fail."""
+    rd = os.path.join(root, "runs", "study30", tag)
+    d = os.path.join(rd, "xai", _xlog.OUT_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    v = np.asarray(val_index, int)
+    pd.DataFrame({"run_id": tag, "row_id": [f"L{i:04d}" for i in v], "val_index": v,
+                  "target": v % 2, "head_kind": "additive",
+                  "image_head_dim": 8, "tabular_head_dim": 8,
+                  "image_logit_centered": 0.50, "tabular_logit_centered": -0.25,
+                  "image_abs_share_descriptive": 0.60,
+                  "image_target_aligned": 0.10, "tabular_target_aligned": 0.20,
+                  "recon_max_abs_delta": 1e-9}).to_csv(
+        os.path.join(d, _xlog.PER_SAMPLE_CSV), index=False)
+    return rd
+
+
+_ask30 = np.arange(10)
+_rd30a = _cached30("other_sample", _ask30 + 5)
+_rd30b = _cached30("same_sample", _ask30)
+
+_ok30, _m30 = raises(lambda: _xlog.decompose_run(_rd30a, TMP, subset_idx=_ask30))
+check("A. a table decomposed on other rows is refused, not reused", _ok30, _m30)
+
+check("B. the table decomposed on the rows asked for is reused, with no model loaded",
+      np.array_equal(_xlog.decompose_run(_rd30b, TMP, subset_idx=_ask30)["val_index"], _ask30))
+
+_master30 = pd.DataFrame({"impl_name": "vanilla", "setting_tag": "base", "seed": [0, 1],
+                          "run_dir": [_rd30b, _rd30a]})
+_ok30c, _m30c = raises(lambda: _xlog.decompose_study(_master30, TMP, subset_idx=None,
+                                                     out_dir=TMP, verbose=False))
+check("C. with no `subset_idx` to compare against, two populations are caught run to run "
+      "before they reach one aggregate", _ok30c, _m30c)
+
+_src30 = _inspect28.getsource(xf.explanation_faithfulness)
+check("D. the faithfulness stamp names the rows the curves hold: when the saved SHAP covers "
+      "part of the sample, `val_index` is narrowed with it",
+      "eff_subset = eff_subset[ei]" in _src30 and 'npz["val_index"] = eff_subset' in _src30
+      and "assert len(eff_subset) == n" in _src30)
+
+# ======================================================================= 31 ===
+section("31. FEATURE SPACE BINDING — this checkpoint against the space of this session")
+# Nothing here is a constant: the run records the space it was trained with, the space
+# reports its own width and adapt state, and the session declares the one it loaded. Any
+# width written into the code or into a committed reference belongs to one dataset only.
+from isic24 import xai_driver as _xd31                                  # noqa: E402
+
+_DECL31 = "feature_space/20260810-192622/feature_space.keras"
+_OTHER31 = "feature_space/20260810-163712/feature_space.keras"
+_FP31 = "a" * 64
+
+
+def _bind31(cfg, fp=_FP31):
+    return _xd31.assert_run_feature_space(cfg, "run31", _DECL31, fp)
+
+
+_ok31, _m31 = raises(lambda: _bind31({"feature_space_file": _OTHER31}))
+check("A. a run trained against another space is refused before the checkpoint is loaded",
+      _ok31, _m31)
+
+check("B. the run that declares this space passes, and says how far the check reached",
+      _bind31({"feature_space_file": _DECL31, "feature_space_fingerprint": _FP31})
+      == "fingerprint" and _bind31({"feature_space_file": _DECL31}) == "file")
+
+_ok31c, _m31c = raises(lambda: _bind31({"feature_space_file": _DECL31,
+                                        "feature_space_fingerprint": "b" * 64}))
+check("C. the same path re-adapted is caught too: same file, another adapt state", _ok31c, _m31c)
+
+check("D. a run that records no space falls back to the width, and DECLARES that it did",
+      _bind31({}) == "width")
+
+# The two spaces of case E differ only in their adapt statistics.
+from types import SimpleNamespace as _SNS31                             # noqa: E402
+import keras as _keras31                                                # noqa: E402
+import tensorflow as _tf31                                              # noqa: E402
+
+_fs31 = []
+for _scale in (1.0, 7.0):
+    _f31 = _keras31.utils.FeatureSpace(
+        features={"x": _keras31.utils.FeatureSpace.float_normalized(),
+                  "c": _keras31.utils.FeatureSpace.string_categorical(num_oov_indices=0)},
+        output_mode="concat")
+    _f31.adapt(_tf31.data.Dataset.from_tensor_slices(
+        {"x": np.arange(20, dtype="float32") * _scale,
+         "c": np.array(["p", "q"] * 10)}).batch(4))
+    _fs31.append(_f31)
+
+_d31a, _fp31a = _xd31.feature_space_fingerprint(_fs31[0])
+_d31b, _fp31b = _xd31.feature_space_fingerprint(_fs31[1])
+_stub31 = _SNS31(inputs=[_SNS31(name="features", shape=(None, _d31a))])
+check("E. the width check CANNOT see it: two spaces of equal width and different adapt "
+      "state pass it, and only the fingerprint separates them",
+      _d31a == _d31b and _fp31a != _fp31b
+      and _xd31.assert_fs_matches_model(_stub31, _fs31[1]) == _d31b,
+      f"width {_d31a} both, fingerprints {_fp31a[:8]} vs {_fp31b[:8]}")
+
+_src31 = _inspect28.getsource(_xd31.load_run_model)
+check("F. every loop inherits the check: load_run_model runs it BEFORE keras loads the "
+      "checkpoint, so a mispaired run costs no GPU",
+      _src31.index("assert_run_feature_space") < _src31.index("keras.models.load_model")
+      and "ctx.feature_space_file" in _src31)
+
+# ======================================================================= 32 ===
+section("32. PAIR TABLES — the unit of inference is the seed, not the pair row")
+# A pair table is a graph: runs are the nodes, pairs are the edges. A test over its rows
+# counts each model once per neighbour, and on the canonical grid it turns six seeds into
+# thirty-odd "observations". Guarded here: the reduction, what it does to the p-value, and
+# the invariant that makes it definable at all.
+from scipy import stats as _stats32                                        # noqa: E402
+
+
+def pair_table(effect, null, impl="fixed_scaling"):
+    """`effect` {seed: [values]} inside one seed, `null` {(seed_a, seed_b): value}."""
+    r = [dict(impl_name=impl, pair_kind="adjacent_param", seed_a=s, seed_b=s, v=v)
+         for s, vs in effect.items() for v in vs]
+    r += [dict(impl_name=impl, pair_kind="same_param_seed", seed_a=a, seed_b=b, v=v)
+          for (a, b), v in null.items()]
+    return pd.DataFrame(r)
+
+
+_SEEDS32 = [8, 47, 53, 71, 90, 101]
+# The canonical shape: the knob moves the top-k features less than the seed does, on every
+# seed — six settings per seed, and the complete set of seed pairs as the null.
+_eff32 = {s: [0.86 + 0.01 * i for i in range(6)] for s in _SEEDS32}
+_null32 = {(a, b): 0.70 for i, a in enumerate(_SEEDS32) for b in _SEEDS32[i + 1:]}
+_t32 = pair_table(_eff32, _null32)
+_c32 = _xm2.seed_level_contrast(_t32, "v", "adjacent_param", "same_param_seed", by="impl_name")
+_row32 = _c32.iloc[0]
+
+check("A. the unit reported is the seed, not the row",
+      _row32.n_seeds == 6 and len(_t32) == 51,
+      f"{int(_row32.n_seeds)} seeds out of {len(_t32)} pair rows")
+
+_mwu32 = _stats32.mannwhitneyu(_t32.v[_t32.pair_kind == "adjacent_param"],
+                            _t32.v[_t32.pair_kind == "same_param_seed"]).pvalue
+check("C. the old inference is optimistic exactly where the new one CANNOT be: Mann-Whitney "
+      "over the rows against the paired test over the seeds",
+      _mwu32 < 1e-6 and _row32.sign_p >= _row32.p_floor
+      and abs(_row32.p_floor - 0.03125) < 1e-12,
+      f"rows p = {_mwu32:.2e}, seeds p = {_row32.sign_p:.4f} at the floor {_row32.p_floor:.5f}")
+
+# Four times the pairs at UNCHANGED per-seed means: a row-level test reads them as evidence,
+# a seed-level one does not move. That is what "the unit is the seed" has to mean.
+_t32b = pair_table({s: [v for v in vs for _ in range(4)] for s, vs in _eff32.items()}, _null32)
+_c32b = _xm2.seed_level_contrast(_t32b, "v", "adjacent_param", "same_param_seed", by="impl_name")
+_mwu32b = _stats32.mannwhitneyu(_t32b.v[_t32b.pair_kind == "adjacent_param"],
+                             _t32b.v[_t32b.pair_kind == "same_param_seed"]).pvalue
+check("D. four times the pairs, the same six seeds -> the seed test is identical and the row "
+      "test is not",
+      abs(_c32b.iloc[0].sign_p - _row32.sign_p) < 1e-12
+      and abs(_c32b.iloc[0].diff_mean - _row32.diff_mean) < 1e-12 and _mwu32b < _mwu32,
+      f"rows {_mwu32:.2e} -> {_mwu32b:.2e}, seeds {_row32.sign_p:.4f} unchanged")
+
+# A seed's null is the mean over the pairs that TOUCH it. On the complete graph that equals
+# the mean over rows; on the chain of consecutive seeds — the null the producer used to
+# build — it does not, because the two end seeds carry one pair and the middle ones two.
+_t32c = pair_table({s: [0.9] for s in (8, 47, 53, 71)},
+                   {(8, 47): 0.9, (47, 53): 0.3, (53, 71): 0.3})
+_c32c = _xm2.seed_level_contrast(_t32c, "v", "adjacent_param", "same_param_seed")
+_rowmean32 = _t32c.v[_t32c.pair_kind == "same_param_seed"].mean()
+check("B. a seed's null is the mean over the pairs that touch it, not the mean over rows",
+      abs(_c32c.iloc[0].null_mean - 0.525) < 1e-12 and abs(_rowmean32 - 0.5) < 1e-12,
+      f"by seed {_c32c.iloc[0].null_mean:.4f}, by row {_rowmean32:.4f}")
+
+_t32d = _t32.copy()
+_t32d.loc[_t32d.pair_kind == "adjacent_param", "seed_b"] = 999
+ok, msg = raises(lambda: _xm2.seed_level_contrast(_t32d, "v", "adjacent_param",
+                                                  "same_param_seed", by="impl_name"))
+check("E. an effect arm spanning two seeds -> RAISES instead of reducing", ok, msg)
+
+_t32e = pd.concat([_t32, pair_table({}, _null32, impl="vanilla")], ignore_index=True)
+_c32e = _xm2.seed_level_contrast(_t32e, "v", "adjacent_param", "same_param_seed",
+                                 by="impl_name")
+check("F. a family with no effect arm is dropped and NAMED, never averaged into the table",
+      set(_c32e.impl_name) == {"fixed_scaling"},
+      f"{sorted(set(_t32e.impl_name))} in, {sorted(set(_c32e.impl_name))} out")
+
+# The producer has to emit the seed columns for both arms, or nothing above is computable.
+_grid32 = [(t, s) for t in ("a0p250", "a0p500") for s in (47, 53, 71)]
+_st32 = xmet.stability_table(
+    pd.DataFrame([dict(impl_name="fixed_scaling", setting_tag=t, seed=s, run_id=f"{t}_{s}",
+                       run_dir=make_shap_run(f"st32_{t}_{s}", np.arange(1, N + 1)))
+                  for t, s in _grid32]), "/", NAMES)
+check("G. stability_table keys both arms the same way: seed_a/seed_b, no mixed column",
+      {"seed_a", "seed_b"} <= set(_st32.columns) and "seed" not in _st32.columns
+      and _st32.seed_a.dtype.kind == "i"
+      and (_st32[_st32.pair_kind == "adjacent_param"].seed_a
+           == _st32[_st32.pair_kind == "adjacent_param"].seed_b).all(),
+      f"columns {[c for c in _st32.columns if 'seed' in c]}")
+check("H. the seed null is the COMPLETE set of seed pairs, not the consecutive ones: on 3 "
+      "seeds that is 3 pairs per setting and not 2",
+      (_st32.pair_kind == "same_param_seed").sum() == 6
+      and (_st32.pair_kind == "adjacent_param").sum() == 3,
+      f"{(_st32.pair_kind == 'same_param_seed').sum()} null pairs on 2 settings x 3 seeds")
+
+# ======================================================================= 33 ===
+section("33. AGGREGATE NAMES — a table never takes the name another population holds")
+# The files of `_faithfulness/` are named after what a table IS, never after the runs it is
+# over, so re-running a section writes over the previous study's table under its own name and
+# nothing fails. Guarded here: what identifies a population, what does not, and the one case
+# that must still pass — a study rewriting its own table.
+_AGG = os.path.join(TMP, "agg33")
+os.makedirs(_AGG, exist_ok=True)
+
+
+def agg_csv(name, run_ids, cols=("run_id",)):
+    p = os.path.join(_AGG, name)
+    d = {c: list(run_ids) for c in cols}
+    pd.DataFrame(dict(d, impl_name="fixed_scaling", setting_tag="a0p500",
+                      seed=list(range(len(list(run_ids)))))).to_csv(p, index=False)
+    return p
+
+
+_june = agg_csv("june.csv", [f"j{i}" for i in range(110)])
+_canon = [f"c{i}" for i in range(132)]
+ok, msg = raises(lambda: xs.assert_same_population(_june, _canon))
+check("A. another study's table under the name this one takes -> RAISES", ok, msg)
+
+_own = agg_csv("own.csv", _canon)
+ok_b, msg_b = raises(lambda: xs.assert_same_population(_own, _canon))
+check("B. a study rewriting its OWN table passes", not ok_b, msg_b)
+ok_b2, _ = raises(lambda: xs.assert_same_population(_own, _canon[:5]))
+check("B2. and so does a partial redo: one run in common is enough", not ok_b2)
+ok_b3, _ = raises(lambda: xs.assert_same_population(os.path.join(_AGG, "absent.csv"), _canon))
+check("B3. a name nobody holds is free", not ok_b3)
+
+# identity, precisely: the two studies share every family, setting and seed.
+_shared = pd.read_csv(_june)[["impl_name", "setting_tag", "seed"]]
+_shared_c = pd.read_csv(_own)[["impl_name", "setting_tag", "seed"]].head(len(_shared))
+check("C. the OLD code has nothing to notice with: family, setting and seed are IDENTICAL "
+      "across the two studies, and only run_id separates them",
+      _shared.equals(_shared_c) and not (set(pd.read_csv(_june).run_id)
+                                         & set(pd.read_csv(_own).run_id)),
+      "same keys, disjoint run ids")
+
+_anon = os.path.join(_AGG, "anon.csv")
+pd.DataFrame(dict(impl_name=["fixed_scaling"], setting_tag=["a0p500"], seed=[8],
+                  stability_at_k=[0.9])).to_csv(_anon, index=False)
+ok, msg = raises(lambda: xs.assert_same_population(_anon, _canon))
+check("D. a table that cannot name its runs is refused, not trusted", ok, msg)
+
+_pairs = os.path.join(_AGG, "pairs.csv")
+pd.DataFrame(dict(run_id_a=["c1"], run_id_b=["c2"], stability_at_k=[0.9])).to_csv(_pairs,
+                                                                                 index=False)
+ok_e, msg_e = raises(lambda: xs.assert_same_population(_pairs, _canon))
+check("E. a PAIR table names its population in two columns, and both are read",
+      not ok_e, msg_e)
+ok_e2, _ = raises(lambda: xs.assert_same_population(_pairs, [f"j{i}" for i in range(110)]))
+check("E2. and the same pair table against another population still raises", ok_e2)
+
+_srcF = _inspect28.getsource(xs.report)
+check("F. every aggregate xs.report writes is guarded, and the shape tables are cleared "
+      "before either of them is written",
+      _srcF.count("assert_same_population") == 3
+      and _srcF.rindex("assert_same_population") < _srcF.index("df.to_csv(p, index=False)"),
+      f"{_srcF.count('assert_same_population')} call sites in xs.report")
+
+_srcG = _inspect28.getsource(xmet.stability_table)
+check("G. the pair table the guard has to read now carries run ids",
+      "run_id_a=" in _srcG and "run_id_b=" in _srcG
+      and {"run_id_a", "run_id_b"} <= set(_st32.columns),
+      f"{[c for c in _st32.columns if c.startswith('run_id')]}")
+
+# ======================================================================= 34 ===
+section("34. GATE DIAGNOSTICS — the population is the validation set, not its first batch")
+# The gate is Dense(2, softmax) over the fused embeddings, so its weights are a per-sample
+# quantity; the cell read them from `next(iter(ds))` and saved the mean as a whole-validation
+# number. Guarded here: the pass covers every row, the one-batch mean is shown differing from
+# it, and the feature ablation no longer draws from the global RNG.
+import keras as _k34                                                    # noqa: E402
+import tensorflow as _tf34                                              # noqa: E402
+from isic24 import xai_logit as _xl34                                   # noqa: E402
+
+_N34, _B34 = 200, 32
+
+
+def gate_model34():
+    """A model whose gate weight is a monotone function of the single feature.
+
+    Its weights are pinned, not initialised: the point of the fixture is that the mean over a
+    prefix and the mean over the whole set differ by construction, and a random draw could
+    make that difference vanish.
+    """
+    img = _k34.Input(shape=(4, 4, 3), name="images")
+    tab = _k34.Input(shape=(1,), name="features")
+    e_img = _k34.layers.Dense(2, activation="selu", name="img_emb")(_k34.layers.Flatten()(img))
+    e_tab = _k34.layers.Dense(2, activation="selu", name="tab_emb")(tab)
+    g = _k34.layers.Dense(2, activation="softmax", name="gate_weights")(
+        _k34.layers.Concatenate()([e_img, e_tab]))
+    w_i = _k34.layers.Lambda(lambda w: w[:, 0:1])(g)
+    w_t = _k34.layers.Lambda(lambda w: w[:, 1:2])(g)
+    fused = _k34.layers.Add()([_k34.layers.Multiply()([e_img, w_i]),
+                               _k34.layers.Multiply()([e_tab, w_t])])
+    m = _k34.Model([img, tab], _k34.layers.Dense(1, activation="sigmoid", name="out")(fused))
+    m.get_layer("img_emb").set_weights([np.full((48, 2), 1 / 48, "float32"),
+                                        np.zeros(2, "float32")])
+    m.get_layer("tab_emb").set_weights([np.array([[1.0, 0.0]], "float32"),
+                                        np.zeros(2, "float32")])
+    # The gate reads the tabular embedding only — the two image columns are zeroed — so the
+    # weights stay a function of `features` while the image branch still moves the logit.
+    m.get_layer("gate_weights").set_weights(
+        [np.array([[0, 0], [0, 0], [2.0, -2.0], [0, 0]], "float32"), np.zeros(2, "float32")])
+    m.get_layer("out").set_weights([np.ones((2, 1), "float32"), np.zeros(1, "float32")])
+    return m
+
+
+# `features` ramps from 0 to 1 down the frame, so the first batch is the bottom of the ramp
+# and any per-sample gate must read differently there than over the whole set.
+_feat34 = np.linspace(0.0, 1.0, _N34, dtype="float32").reshape(-1, 1)
+_ds34 = _tf34.data.Dataset.from_tensor_slices((
+    {"images": np.zeros((_N34, 4, 4, 3), "float32"), "features": _feat34},
+    np.r_[np.zeros(_N34 // 2), np.ones(_N34 - _N34 // 2)].astype("float32"))).batch(_B34)
+
+_m34 = gate_model34()
+_df34 = _xl34.gate_per_sample(_m34, _ds34)
+_sum34 = _xl34.gate_summary(_df34)
+
+check("A. the pass covers every row, and the summary says how many",
+      len(_df34) == _N34 and _sum34["n"] == _N34
+      and list(_df34.val_index) == list(range(_N34)),
+      f"n={_sum34['n']} of {_N34}, val_index stamped")
+
+# C. the defect, measured: what the old code reported against what the row set says.
+_gate34 = _k34.Model(_m34.inputs, _m34.get_layer("gate_weights").output)
+_first34 = float(np.asarray(_gate34(next(iter(_ds34))[0], training=False))[:, 0].mean())
+check("C. the old one-batch mean is NOT the whole-validation mean it was saved as",
+      abs(_first34 - _sum34["gate_weight_mean_img"]) > 1e-4,
+      f"batch 0 ({_B34} rows) {_first34:.6f} vs all {_N34} rows "
+      f"{_sum34['gate_weight_mean_img']:.6f}")
+
+check("B. the two gate weights are a softmax and still sum to one per sample",
+      np.allclose(_df34.w_img + _df34.w_tab, 1.0, atol=1e-5))
+
+# D. the ablation is reproducible: it used to draw the feature mask from the global stream.
+_x34 = next(iter(_ds34))[0]
+_a34 = [np.asarray(_xl34.ablate_batch(_x34, "tab", 0.5,
+                                      _tf34.random.Generator.from_seed(7))["features"])
+        for _ in range(2)]
+_b34 = np.asarray(_xl34.ablate_batch(_x34, "tab", 0.5,
+                                     _tf34.random.Generator.from_seed(9))["features"])
+check("D. a declared seed makes the feature ablation reproducible, and a different seed "
+      "moves it — the mask is no longer drawn from the global stream",
+      np.array_equal(_a34[0], _a34[1]) and not np.array_equal(_a34[0], _b34),
+      "same seed identical, other seed different")
+
+check("E. at strength 1.0 the features are fully zeroed, which is why the unseeded draw "
+      "was inert and the defect dormant",
+      np.array_equal(np.asarray(_xl34.ablate_batch(_x34, "tab", 1.0,
+                                                   _tf34.random.Generator.from_seed(0))["features"]),
+                     np.zeros_like(np.asarray(_x34["features"]))),
+      "mask all False -> zeros, whatever the draw")
+
+# The images are identical and the gate ignores them, so greying one out moves the logit by
+# exactly `selu(0.5) * 2 * w_img`: the impact of removing the image IS its gate weight, up to a
+# constant. A correct rank correlation over all 200 rows can only be 1.
+check("F. the rank correlation is the gate's own claim put to the test: on a model where the "
+      "image impact is proportional to the image weight, it must come out at 1",
+      abs(_sum34["spearman_w_img_delta_img"] - 1.0) < 1e-9 and len(_df34) == _N34,
+      f"rho_img {_sum34['spearman_w_img_delta_img']:+.6f} over {len(_df34)} rows")
+
+# ======================================================================= 35 ===
+section("35. THE DECLARED ENVIRONMENT — what the pipeline imports, requirements declares")
+# `xailib` was installed on this machine from a requirements line that was COMMENTED OUT, so
+# the import worked here and nowhere else: the environment reproduced only because the machine
+# remembered an install the declaration no longer described. The engine that imported it is
+# gone; what stays is the check, walking the imports rather than trusting the file.
+import ast as _ast35                                                    # noqa: E402
+import glob as _glob35                                                  # noqa: E402
+import json as _js35                                                    # noqa: E402
+
+# module name -> the distribution that provides it, where the two differ.
+_DIST35 = {"sklearn": "scikit-learn", "cv2": "opencv-python", "PIL": "pillow",
+           "tf_explain": "tf-explain", "keras_cv": "keras-cv", "skimage": "scikit-image"}
+# The notebook runtime itself, which requirements does not declare any more than it declares
+# jupyter: an import of it is not a dependency of the pipeline.
+_RUNTIME35 = {"IPython"}
+# The pipeline: the modules, the two canonical notebooks, and the dataset build the status
+# names as the source of truth. The Colab exploration notebooks are not part of it.
+_NB35 = ["notebooks/modality_attendance/isic24_modality_attendance_train_canon.ipynb",
+         "notebooks/modality_attendance/isic24_modality_attendance_posthoc canon.ipynb",
+         "notebooks/data_preproc/isic24_create_dataset.ipynb"]
+
+
+def imports35(src):
+    out = set()
+    src = "\n".join(("#" + l if l.lstrip().startswith(("!", "%")) else l)
+                     for l in src.splitlines())
+    for n in _ast35.walk(_ast35.parse(src)):
+        if isinstance(n, _ast35.Import):
+            out |= {a.name.split(".")[0] for a in n.names}
+        elif isinstance(n, _ast35.ImportFrom) and n.level == 0 and n.module:
+            out.add(n.module.split(".")[0])
+    return out
+
+
+def nb_code35(path):
+    nb = _js35.load(open(os.path.join(BASE, path)))
+    return "\n".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
+
+
+_used35 = set()
+for _f in sorted(_glob35.glob(os.path.join(BASE, "src", "isic24", "*.py"))):
+    _used35 |= imports35(open(_f).read())
+for _p in _NB35:
+    _used35 |= imports35(nb_code35(_p))
+_third35 = sorted(m for m in _used35
+                  if m not in sys.stdlib_module_names and m not in {"isic24", "src"}
+                  and m not in _RUNTIME35)
+
+_req35 = open(os.path.join(BASE, "requirements.txt")).read()
+_declared35 = {l.split("==")[0].split(">=")[0].split("<")[0].split("@")[0].split(";")[0]
+               .split("[")[0].strip().lower()
+               for l in _req35.splitlines() if l.strip() and not l.startswith("#")}
+_missing35 = [m for m in _third35
+              if _DIST35.get(m, m).lower() not in _declared35 and m.lower() not in _declared35]
+check("A. every third-party module the pipeline imports is declared in requirements.txt",
+      not _missing35, f"{len(_third35)} modules, undeclared: {_missing35 or 'none'}")
+
+_bare35 = [l.strip() for l in _req35.splitlines()
+           if l.strip() and not l.startswith("#")
+           and not any(t in l for t in ("==", ">=", "<=", "<", ">", "@"))]
+check("B. no requirement is left unversioned — a bare name resolves to whatever the day gives",
+      not _bare35, f"unversioned: {_bare35 or 'none'}")
+
+# C. the backend and the visible device are chosen BEFORE tensorflow is imported, or the
+# import has already read the defaults and the assignment is decoration.
+_env35 = ("KERAS_BACKEND", "CUDA_VISIBLE_DEVICES", "TF_CPP_MIN_LOG_LEVEL")
+for _p in _NB35[:2]:
+    _code35 = nb_code35(_p)
+    _tf35 = min((_code35.index(t) for t in ("import tensorflow",) if t in _code35), default=-1)
+    _late35 = [v for v in _env35
+               if v not in _code35 or (_tf35 >= 0 and _code35.index(v) > _tf35)]
+    check(f"C. {os.path.basename(_p)[:34]}: the environment is set before tensorflow is "
+          f"imported", not _late35 and _tf35 > 0, f"set after the import: {_late35 or 'none'}")
+
+_bad35 = "import tensorflow as tf\nos.environ['KERAS_BACKEND'] = 'tensorflow'\n"
+_tf_bad = _bad35.index("import tensorflow")
+check("D. the reversed order fails the same check, so it is the ORDER being measured and not "
+      "the presence of the two lines",
+      _bad35.index("KERAS_BACKEND") > _tf_bad,
+      "assignment after the import is what the check catches")
+
+# ======================================================================= 36 ===
+section("36. FEATURE PROVENANCE — the engineered columns against the code that creates them")
+# The premise the study rests on: switching off the tabular branch does not remove the image's
+# information, because most tabular features are computed FROM the image measurements. Written
+# beside the formulas that claim can only be read; parsed off the functions that assign the
+# columns, and recomputed through them, it is measured. The SEQUENCE is part of it — `clean_df`
+# reassigns a column `feature_engineering` has already written, with another formula.
+import json as _js36                                                    # noqa: E402
+from isic24.feature_provenance import (engineered_provenance,           # noqa: E402
+                                       verify_engineered)
+
+_FUNCS36 = ("feature_engineering", "clean_df")
+_FE36 = '''def feature_engineering(df):
+    df["ratio"] = df["a"] / df["b"]
+    df["shifted"] = df["a"] - df["c"]
+    df["combo"] = df["ratio"] + df["shifted"]
+    df["tag"] = df["s"] + "_" + df["t"]
+    return df, ["ratio", "shifted", "combo"], ["tag"]
+'''
+_CLEAN36 = '''def clean_df(df):
+    out = df.copy()
+    out["ratio"] = out["ratio"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return out
+'''
+_NB36 = os.path.join(TMP, "build36.ipynb")
+
+
+def _nbcell36(src):
+    return {"cell_type": "code", "source": src.splitlines(keepends=True),
+            "metadata": {}, "outputs": [], "execution_count": None}
+
+
+_js36.dump({"cells": [_nbcell36(_FE36),
+                      _nbcell36("df = pd.read_csv('/nonexistent/metadata.csv')\n"),
+                      _nbcell36(_CLEAN36)],
+            "metadata": {}, "nbformat": 4, "nbformat_minor": 5}, open(_NB36, "w"))
+
+_src36, _roots36 = engineered_provenance(_NB36, _FUNCS36)
+check("A. a column built from other engineered columns resolves to the raw ones, so the map is "
+      "expressed in columns the build never writes",
+      _roots36["combo"] == {"a", "b", "c"} and _roots36["ratio"] == {"a", "b"},
+      f"combo <- {sorted(_roots36['combo'])}")
+
+check("B. only the functions are taken from the notebook: the cell between them reads a file "
+      "that does not exist, and nothing executes it",
+      "read_csv" not in _src36 and _src36.count("def ") == 2,
+      f"{len(_src36.splitlines())} lines, the two functions alone")
+
+# b=0 on the second row: the ratio is infinite out of the first function and 0.0 after the
+# second, so the two disagree on a value that IS on disk.
+_df36 = pd.DataFrame({"a": [1.0, 2.0, 3.0, np.nan], "b": [2.0, 0.0, 5.0, 1.0],
+                      "c": [0.5, 0.5, 1.0, 1.0], "s": ["x", "y", "x", "y"],
+                      "t": ["p", "p", "q", "q"]})
+_ns36 = {"np": np, "pd": pd}
+exec(_src36, _ns36)
+_built36 = _ns36["clean_df"](_ns36["feature_engineering"](_df36.copy())[0])
+
+_partial36 = verify_engineered(_built36, _src36, _roots36, ("feature_engineering",))
+check("C. the sequence is part of the transformation: checked against the first function alone, "
+      "the column the second one rewrites reports a difference",
+      _partial36["ratio"] > 0,
+      f"ratio differs on {_partial36['ratio']} of {len(_built36)} rows")
+
+_full36 = verify_engineered(_built36, _src36, _roots36, _FUNCS36)
+check("D. through both, nothing differs — the substituted value and the NaN included",
+      int(_full36.sum()) == 0, f"0 differing rows over {len(_built36)}")
+
+_edited36 = _built36.copy()
+_edited36.loc[0, "shifted"] = 99.0
+_edited36.loc[2, "tag"] = "wrong"
+_dev36 = verify_engineered(_edited36, _src36, _roots36, _FUNCS36)
+check("E. a column that is not what it reads is caught in both kinds, numeric and categorical, "
+      "and the one computed FROM it stays clean",
+      _dev36["shifted"] == 1 and _dev36["tag"] == 1 and _dev36["ratio"] == 0
+      and _dev36["combo"] == 0, f"differing rows {_dev36[_dev36 > 0].to_dict()}")
+
+_trimmed36 = {k: v - {"b"} for k, v in _roots36.items()}
+_ok36, _det36 = raises(lambda: verify_engineered(_built36, _src36, _trimmed36, _FUNCS36), KeyError)
+check("F. a map naming too few sources cannot quietly agree: the build is handed the columns the "
+      "map names, and the one left out is missing", _ok36, _det36)
+
+_literal36 = ["a", "b", "shifted"]
+_feat36 = ["a", "b", "shifted", "combo", "tag"]
+check("G. the release half is the complement of what the build writes, so a column the build "
+      "starts computing changes side on its own — the hand-typed list still calls it release",
+      [c for c in _feat36 if c not in _roots36] == ["a", "b"] and "shifted" in _literal36,
+      f"derived {[c for c in _feat36 if c not in _roots36]}, hand-typed {_literal36}")
+
+_sneaky36 = _ns36["feature_engineering"](_df36.copy())[0].assign(extra=1.0)
+check("H. a column created by a form the parse does not read stays out of the map, and would be "
+      "filed as a release column; comparing the headers is what sees it, and that check does not "
+      "depend on having read the code right",
+      "extra" not in _roots36
+      and (set(_sneaky36.columns) - set(_df36.columns)) - set(_roots36) == {"extra"},
+      "a column the parse cannot see is exactly what the header difference reports")
+
+# The live tree. The frozen evaluation frame carries the build's own metadata header plus the
+# `fold` column the split adds, and it is the small one.
+_NBL36 = os.path.join(BASE, "notebooks", "data_preproc", "isic24_create_dataset.ipynb")
+_FRAME36 = os.path.join(ART, "evaluation_frame.parquet")
+_NOTCAND36 = {"isic_id", "patient_id", "lesion_id", "target", "image_type", "copyright_license",
+              "tbp_lv_dnn_lesion_confidence", "iddx_full",
+              "iddx_1", "iddx_2", "iddx_3", "iddx_4", "iddx_5"}
+
+if not os.path.exists(_FRAME36):
+    print("  (frozen evaluation frame unavailable: the live cases are skipped)")
+else:
+    _srcL36, _rootsL36 = engineered_provenance(_NBL36, _FUNCS36)
+    _nsL36 = {}
+    exec(_cell15("FEAT_COLS"), _nsL36)                             # list literals only
+    _featL36 = _nsL36["FEAT_COLS"]
+    _engL36 = [c for c in _featL36 if c in _rootsL36]
+    _reachL36 = set().union(*(_rootsL36[c] for c in _engL36))
+    _hdr36 = [c for c in pd.read_parquet(_FRAME36).columns if c != "fold"]
+    _used36 = [c for c in _hdr36 if c in _featL36]
+    _drop36 = [c for c in _hdr36 if c not in _featL36 and c not in _NOTCAND36]
+    check("I. the metadata header partitions into the columns nothing may read, the ones the "
+          "model reads and the ones it drops, with nothing left over",
+          _NOTCAND36 <= set(_hdr36) and not set(_used36) & _NOTCAND36
+          and len(_NOTCAND36) + len(_used36) + len(_drop36) == len(_hdr36),
+          f"{len(_hdr36)} = {len(_NOTCAND36)} not candidates + {len(_used36)} used + "
+          f"{len(_drop36)} dropped")
+
+    _reex36 = [c for c in _drop36 if c in _reachL36]
+    _abs36 = [c for c in _drop36 if c not in _reachL36]
+    check("J. what the dropped columns become is a measurement and not the sentence beside them: "
+          "part survives inside an engineered feature, part reaches the model in no form at all",
+          bool(_reex36) and bool(_abs36),
+          f"{len(_reex36)} re-expressed, {len(_abs36)} absent: {_abs36}")
+
+    if _REL_META.exists():
+        _outside36 = sorted(_reachL36 - _header(_REL_META))
+        check("K. every engineered feature the model reads resolves to columns of the ISIC "
+              "release: the variant computes, it does not measure",
+              not _outside36,
+              _outside36 or f"{len(_reachL36)} source columns, all in the release")
+
+        _added36 = set(_hdr36) - _header(_REL_META)
+        check("L. and the map is complete because the data says so: the columns the build ADDS "
+              "to the source header are exactly the ones it names, so nothing it creates can be "
+              "mistaken for a column the release already shipped",
+              _added36 == set(_rootsL36),
+              f"added {len(_added36)}, named {len(_rootsL36)}, unnamed "
+              f"{sorted(_added36 - set(_rootsL36)) or 'none'}")
+
 
 # =============================================================================
 shutil.rmtree(TMP, ignore_errors=True)

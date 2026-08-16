@@ -213,7 +213,17 @@ def decompose_run(run_dir, art_path, subset_idx=None, batch=None, labels=None,
     out_dir = os.path.join(abs_dir, "xai", OUT_DIRNAME)
     out_csv = os.path.join(out_dir, PER_SAMPLE_CSV)
     if write and os.path.exists(out_csv) and not overwrite:
-        return pd.read_csv(out_csv)
+        cached = pd.read_csv(out_csv)
+        # The cache is keyed on the folder, which carries no population: the sample that
+        # produced the table can only be read off the table itself.
+        got = cached["val_index"].to_numpy(int) if "val_index" in cached else np.empty(0, int)
+        if subset_idx is not None and not np.array_equal(got, np.asarray(subset_idx, int)):
+            want = np.asarray(subset_idx, int)
+            raise RuntimeError(
+                f"{out_csv}\n  was decomposed on another sample: cached n={len(got)} "
+                f"{got[:3].tolist()}..., requested n={len(want)} {want[:3].tolist()}...\n"
+                f"  Pass overwrite=True to recompute it on the rows asked for.")
+        return cached
 
     if batch is None:
         batch, labels = probe_fn() if probe_fn else make_probe_batch(subset_idx=subset_idx)
@@ -313,10 +323,20 @@ def decompose_study(master, art_path, subset_idx=None, central=None, overwrite=F
             probe["b"], probe["y"] = make_probe_batch(subset_idx=subset_idx)
         return probe["b"], probe["y"]
 
-    rows, per_sample = [], []
+    rows, per_sample, pop = [], [], None
     for k, (_, r) in enumerate(m.iterrows(), 1):
         df = decompose_run(r["run_dir"], art_path, subset_idx=subset_idx, probe_fn=_probe,
                            overwrite=overwrite)
+        # Without a `subset_idx` the per-run guard has nothing to compare against, so the
+        # rows are compared run to run here: an aggregate spans one population, not two.
+        idx = df["val_index"].to_numpy(int)
+        if pop is None:
+            pop = idx
+        elif not np.array_equal(idx, pop):
+            raise RuntimeError(
+                f"{r['run_dir']}\n  was decomposed on {len(idx)} rows {idx[:3].tolist()}..., "
+                f"the runs before it on {len(pop)} {pop[:3].tolist()}...: one table, two "
+                f"populations.")
         df["impl_name"], df["setting_tag"], df["seed"] = r["impl_name"], r["setting_tag"], r["seed"]
         row = _run_row(df)
         row.update(impl_name=r["impl_name"], setting_tag=r["setting_tag"], seed=r["seed"])
@@ -332,6 +352,7 @@ def decompose_study(master, art_path, subset_idx=None, central=None, overwrite=F
 
     out_dir = out_dir or os.path.join(art_path, "runs", xs.AGGREGATE_DIRNAME)
     os.makedirs(out_dir, exist_ok=True)
+    xs.assert_same_population(os.path.join(out_dir, AGG_BY_RUN), by_run.run_id)
     by_run.to_csv(os.path.join(out_dir, AGG_BY_RUN), index=False)
     by_family.to_csv(os.path.join(out_dir, AGG_BY_FAMILY), index=False)
     return by_run, by_family, pd.concat(per_sample, ignore_index=True)
@@ -434,6 +455,95 @@ def gamma_curve(per_sample, art_path, master=None, deltas=DEFAULT_DELTAS, out_di
 
     out_dir = out_dir or os.path.join(art_path, "runs", xs.AGGREGATE_DIRNAME)
     os.makedirs(out_dir, exist_ok=True)
+    xs.assert_same_population(os.path.join(out_dir, GAMMA_BY_RUN), by_run.run_id)
     by_run.to_csv(os.path.join(out_dir, GAMMA_BY_RUN), index=False)
     by_family.to_csv(os.path.join(out_dir, GAMMA_BY_FAMILY), index=False)
     return by_run, by_family
+
+
+# --------------------------------------------------------------------------------------
+# Adaptive gating — the weights the gate assigns, against the impact it claims
+# --------------------------------------------------------------------------------------
+GATE_LAYER = "gate_weights"
+
+
+def _logit(p, eps=1e-6):
+    p = np.clip(np.asarray(p, float), eps, 1.0 - eps)
+    return np.log(p / (1.0 - p))
+
+
+def ablate_batch(x, mode, strength, rng):
+    """One batch with a modality removed: the image blended to grey, the features masked.
+
+    `rng` is a `tf.random.Generator` and is not optional. The mask used to be drawn from the
+    global stream, which is inert at `strength=1.0` only because a draw in [0, 1) can never
+    reach the threshold and every feature is zeroed -- and becomes an unseeded RNG at the
+    first smaller strength anyone passes.
+    """
+    import tensorflow as tf
+
+    x = dict(x)
+    if mode in ("img", "both"):
+        img = tf.cast(x["images"], tf.float32)
+        x["images"] = (1.0 - strength) * img + strength * (tf.ones_like(img) * 0.5)
+    if mode in ("tab", "both"):
+        feat = tf.cast(x["features"], tf.float32)
+        x["features"] = tf.where(rng.uniform(tf.shape(feat)) >= strength, feat,
+                                 tf.zeros_like(feat))
+    return x
+
+
+def gate_per_sample(model, ds, strength=1.0, seed=0):
+    """One row per evaluated sample: the gate weights and the three predictions.
+
+    Every gate diagnostic is a function of these columns, and returning them is the point:
+    the pass happens ONCE. The cell that produced them read the gate from the first batch --
+    64 rows of 791 -- and reported its mean as a whole-validation number, while computing the
+    same weights over the whole set twice more in the same loop, for the rank correlation and
+    for the histogram. The gate is `Dense(2, softmax)` over the fused embeddings, so it is a
+    per-sample quantity and a mean over 8% of the rows carries 3.5x the standard error.
+
+    `val_index` is the position in the frame `ds` iterates, so the table says which rows it
+    holds rather than leaving the caller to remember.
+    """
+    import keras
+    import tensorflow as tf
+
+    gate = keras.Model(model.inputs, model.get_layer(GATE_LAYER).output)
+    rng = tf.random.Generator.from_seed(seed)
+
+    frames = []
+    for x, y in ds:
+        w = np.asarray(gate(x, training=False))
+        frames.append(pd.DataFrame({
+            "w_img": w[:, 0], "w_tab": w[:, 1],
+            "prediction": np.asarray(model(x, training=False)).reshape(-1),
+            "prediction_img_off": np.asarray(
+                model(ablate_batch(x, "img", strength, rng), training=False)).reshape(-1),
+            "prediction_tab_off": np.asarray(
+                model(ablate_batch(x, "tab", strength, rng), training=False)).reshape(-1),
+            "target": np.asarray(y).reshape(-1).astype(int),
+        }))
+    df = pd.concat(frames, ignore_index=True)
+    df.insert(0, "val_index", np.arange(len(df)))
+    return df
+
+
+def gate_summary(df):
+    """The scalars, each over EVERY row of `df`, with `n` saying so.
+
+    `spearman_w_*` puts the gate's own claim to the test: a sample whose image weight is high
+    should lose more when the image is taken away. It is a rank correlation across samples, so
+    it reports whether the gate ORDERS them, not whether the level of its weights is right.
+    """
+    from scipy import stats
+
+    d_img = np.abs(_logit(df.prediction) - _logit(df.prediction_img_off))
+    d_tab = np.abs(_logit(df.prediction) - _logit(df.prediction_tab_off))
+    return {
+        "n": int(len(df)),
+        "gate_weight_mean_img": float(df.w_img.mean()),
+        "gate_weight_mean_tab": float(df.w_tab.mean()),
+        "spearman_w_img_delta_img": float(stats.spearmanr(df.w_img, d_img).statistic),
+        "spearman_w_tab_delta_tab": float(stats.spearmanr(df.w_tab, d_tab).statistic),
+    }

@@ -190,6 +190,33 @@ def unique_lesion_subset(ids, labels, n=None, seed=0, balance="pool"):
                  "n_unique_available": avail}
 
 
+def lore_subset(labels, subset_idx, n):
+    """The `n` rows of the adopted sample LORE explains: half per class, evenly spaced.
+
+    LORE costs about 30 minutes a run, so it covers a subset of the sample every other
+    engine explains whole. That subset must not be a prefix: `unique_lesion_subset` keeps
+    the FIRST occurrence of each lesion and the positives are upsampled, so the front of the
+    sample is where they sit -- in the n=144 sample the first 48 rows are 35 positive
+    against 13 negative. Evenly spaced inside each class instead: balanced by construction,
+    deterministic, and identical for every run.
+
+    `labels`     the label of every validation row; `subset_idx` positions into it.
+    Returns positions in the SAME space as `subset_idx`, sorted.
+    """
+    y = np.asarray(labels).reshape(-1)
+    idx = np.asarray(subset_idx, int)
+    if n % 2:
+        raise ValueError(f"n={n}: the LORE subset is half per class, so it must be even")
+    half, pick = n // 2, []
+    for c in (0, 1):
+        pool = idx[y[idx] == c]
+        if len(pool) < half:
+            raise ValueError(f"class {c}: {len(pool)} lesions in the adopted sample of "
+                             f"{len(idx)}, {half} needed for n={n}")
+        pick.append(pool[np.linspace(0, len(pool) - 1, half).round().astype(int)])
+    return np.sort(np.concatenate(pick))
+
+
 def subset_fingerprint(ids_all, idx, seed, n, kind="stratified"):
     """The sample's identity. This is what stops two different orderings being mixed.
 
@@ -362,7 +389,9 @@ def across_runs(per_run_a, per_run_b, name_a="A", name_b="B", drop_ties=True):
 
     One value per RUN, not per sample. Returns a sign test and a Wilcoxon: the first uses
     the direction only, the second the magnitudes as well, and they are read together --
-    when they diverge, the effect lives in a few runs with large differences.
+    when they diverge, the effect lives in a few runs with large differences. `p_floor` is
+    the smallest p the number of units allows, so a p sitting on it means every unit agreed
+    and the test has nothing left to give.
 
     ``drop_ties`` removes the runs whose difference is exactly zero. They must be removed
     AND DECLARED: typically they are saturated by construction (coverage 0 vs 0, or 1 vs 1)
@@ -390,6 +419,10 @@ def across_runs(per_run_a, per_run_b, name_a="A", name_b="B", drop_ties=True):
     res["sign_p"] = (float(stats.binomtest(int((d[inf] > 0).sum()), n_inf, 0.5).pvalue)
                      if n_inf else float("nan"))
     res["wilcoxon_p"] = (float(stats.wilcoxon(d[inf]).pvalue) if n_inf >= 6 else float("nan"))
+    # The smallest p this many units can reach, sign test and Wilcoxon alike: the extreme
+    # outcome has probability 2^-n in each tail. It belongs beside the p-value, not in a
+    # sentence written by hand next to the table.
+    res["p_floor"] = float(min(1.0, 2.0 ** (1 - n_inf))) if n_inf else float("nan")
     if n_inf < 6:
         # With fewer than 6 informative runs Wilcoxon cannot go below 0.05 even when every
         # difference agrees in sign: returning it would suggest a test that is not there.
@@ -410,6 +443,9 @@ def print_across_runs(res, indent="  "):
         print(f"{indent}  Wilcoxon        n/a — {res['note']}")
     else:
         print(f"{indent}  Wilcoxon        p = {res['wilcoxon_p']:.4f}")
+    if res['p_floor'] == res['p_floor']:
+        print(f"{indent}  floor at n = {res['n_informative']}: p = {res['p_floor']:.4f}, "
+              "unreachable from below whatever the effect size")
     if res['n_run'] < 8:
         print(f"{indent}  ⚠ {res['n_run']} runs: any p here is fragile. More seeds, not more samples.")
 
@@ -551,6 +587,97 @@ def drop_ablations(df, where="", verbose=True):
     return df[keep]
 
 
+# The columns the registry is entitled to. A summary that does not carry them is not a
+# summary of one of these runs, and it enters the registry as NaN rather than as an error.
+REGISTRY_COLS = ("impl_name", "exp_tag", "setting_tag", "run_id", "seed", "best_epoch",
+                 "best_val_auc", "run_dir", "model_name")
+
+
+def build_registry(canonical, n_expected=None):
+    """One row per run of the declared studies, read from the per-run summaries.
+
+    `canonical`  {impl_name: study_dir}. Every run under it must be there: a study whose
+                 glob is empty raises instead of leaving the family out of the registry, and
+                 with it out of every table the registry feeds.
+
+    The study-level `combined_summary.csv` is deliberately NOT the source. It is an
+    aggregate written once per sweep -- one of the canonical five carries whitespace-padded
+    headers (`"impl_name        "`, `" seed"`), which concatenate into a second set of
+    columns and leave that family's `setting_tag` and `run_dir` at NaN, invisible to every
+    `groupby`. The per-run summary is the artifact each run writes for itself, so a schema
+    that is not the one the others carry is a fact about a single run and is named as such.
+    """
+    import glob as _glob
+    import pandas as pd
+
+    frames = []
+    for impl, study in canonical.items():
+        paths = sorted(_glob.glob(os.path.join(study, "*", "*", "single_run_summary.csv")))
+        if not paths:
+            raise RuntimeError(
+                f"[REGISTRY] {impl}: no run under {study}. A missing study used to drop out "
+                f"of the registry in silence, taking its family with it.")
+        for f in paths:
+            df = pd.read_csv(f)
+            missing = [c for c in REGISTRY_COLS if c not in df.columns]
+            if len(df) != 1 or missing:
+                raise RuntimeError(
+                    f"[REGISTRY] {f}: {len(df)} rows, missing columns {missing}. A summary "
+                    f"whose schema is not the one the others carry joins the registry with "
+                    f"NaN keys and its family disappears from every groupby.")
+            if df.impl_name.iloc[0] != impl:
+                raise RuntimeError(
+                    f"[REGISTRY] {f}: declares impl_name={df.impl_name.iloc[0]!r} under the "
+                    f"study of {impl!r}")
+            frames.append(df)
+
+    master = pd.concat(frames, ignore_index=True)
+    if n_expected is not None and len(master) != n_expected:
+        raise RuntimeError(
+            f"[REGISTRY] {len(master)} runs over {len(canonical)} studies, {n_expected} "
+            f"declared: " + ", ".join(f"{i}={sum(master.impl_name == i)}" for i in canonical))
+    return master
+
+
+def assert_same_population(path, run_ids):
+    """A cross-run aggregate never takes a name another population still holds.
+
+    The file names of `AGGREGATE_DIRNAME` say what a table is and not which runs it is over,
+    so re-running a section writes over the previous study's table under its own name. Nothing
+    fails, and afterwards there is no way to tell which population a number came from: it is
+    the two-populations-one-name defect at the aggregate level, where it is worse than at the
+    run level because a run directory at least names itself.
+
+    `impl_name`, `setting_tag` and `seed` cannot separate them -- every study here carries the
+    same families, the same settings and overlapping seeds. Only `run_id` can, so a table that
+    holds none is refused rather than trusted: an aggregate that cannot name its runs is not
+    evidence about any of them. Pair tables carry `run_id_a`/`run_id_b`, and any column whose
+    name starts with `run_id` counts.
+
+    An overlap of one run is enough to pass: extending a study or redoing part of it writes
+    over its own table, which is the intended use. What is refused is a table with nothing in
+    common with the population being written.
+    """
+    import pandas as pd
+
+    if not os.path.exists(path):
+        return
+    cols = [c for c in pd.read_csv(path, nrows=0).columns if c.startswith("run_id")]
+    if not cols:
+        raise RuntimeError(
+            f"[AGGREGATE] {path} carries no run identity, so it cannot say which runs it "
+            f"describes — family, setting and seed are shared by every study run here. "
+            f"Archive it before this one takes its name.")
+    prev = set()
+    for c in cols:
+        prev |= set(pd.read_csv(path, usecols=[c])[c].dropna().astype(str))
+    if not (prev & {str(r) for r in run_ids}):
+        raise RuntimeError(
+            f"[AGGREGATE] {path} describes {len(prev)} runs and not one of them is in this "
+            f"population: it is another study's table under the name this one is about to "
+            f"take. Archive it before this one takes its name.")
+
+
 def _run_gains(run_dir, prefix="faithfulness_aligned_signed", modes=("abs",) + SIGNED_MODES_REPORT):
     """Every gain of a run, WITH the sign conventions already applied.
 
@@ -653,6 +780,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         if len(faith):
             sfx = _sfx(faith)
             p = os.path.join(out_dir, f"faithfulness_aligned_signed{sfx}.csv")
+            assert_same_population(p, faith.run_id)
             faith.to_csv(p, index=False); written.append(p)
             if central:
                 sel = faith[[central.get(i) == t
@@ -709,6 +837,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         if len(lore):
             sfx = _sfx(lore)
             p = os.path.join(out_dir, f"lore_sa_quality{sfx}.csv")
+            assert_same_population(p, lore.run_id)
             lore.to_csv(p, index=False); written.append(p)
             lo = (drop_ablations(lore, "lore", verbose)
                   .groupby("impl_name")[["lore_coverage", "lore_coverage_5050",
@@ -743,6 +872,11 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         shape = xmet.collect(master, art_path,
                              encoded_feature_names=encoded_feature_names, lore_idx=lore_idx)
         stab = xmet.stability_table(master, art_path, encoded_feature_names)
+        # Guarded before the loop writes anything: the pooled tables that follow are derived
+        # from these two, so a population that is refused here never reaches them either.
+        for df, name in ((shape, "xai_shape_metrics.csv"), (stab, "xai_stability.csv")):
+            if len(df):
+                assert_same_population(os.path.join(out_dir, name), master.run_id)
         for df, name in ((shape, "xai_shape_metrics.csv"), (stab, "xai_stability.csv")):
             if len(df):
                 p = os.path.join(out_dir, name)
