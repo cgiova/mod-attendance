@@ -473,9 +473,11 @@ def adopt(validation_df, n=None, balance="pool", seed=0, snapshot_dir=None,
     from . import xai_driver as xd
     from . import xai_faithfulness as xf
 
+    global ACTIVE_SUBSET_SNAPSHOT
     if balance is None:                                  # restore the historical behaviour
         xf.FAITH_SUBSET_IDX = None
         xf.ACTIVE_SUBSET_FINGERPRINT = None
+        ACTIVE_SUBSET_SNAPSHOT = None
         xd.LORE_SA_KWARGS.pop("subset_idx", None)
         xd.SHAP_KWARGS.pop("subset_idx", None)
         xd.SHAP_KWARGS.pop("subset_fingerprint", None)
@@ -496,6 +498,7 @@ def adopt(validation_df, n=None, balance="pool", seed=0, snapshot_dir=None,
         idx = np.asarray(snap["positional_idx"], int)
     else:
         fp = save_snapshot(path, ids, idx, seed, len(idx), kind=kind, extra={"info": info})
+    ACTIVE_SUBSET_SNAPSHOT = path
 
     if "faithfulness" in apply_to:
         xf.FAITH_SUBSET_IDX = idx
@@ -639,6 +642,57 @@ def build_registry(canonical, n_expected=None):
     return master
 
 
+ACTIVE_SUBSET_SNAPSHOT = None   # set by `adopt`; the sample every aggregate is computed under
+
+
+def aggregate_provenance(**knobs):
+    """What a cross-run aggregate was computed FROM: population, sample, encoding, knobs.
+
+    The post-hoc twin of the training notebook's `run_provenance()`, and deliberately the same
+    kind of content — data and parameters, not a code version, which neither half records.
+    `run_id` says WHICH runs a table holds; nothing said under which sample and which knobs
+    their numbers were produced, and that is recoverable only by opening the runs one by one.
+
+    Everything here is session state already declared: `XaiContext` for the frames and the
+    encoding, `adopt` for the sample. An unconfigured session raises through `_CTX` itself,
+    which is the right answer: a table that cannot say what produced it is the defect.
+    """
+    from . import paths as pth
+    from . import xai_faithfulness as xf
+
+    ctx = xf._CTX
+    idx = getattr(xf, "FAITH_SUBSET_IDX", None)
+    return {
+        "dataset": f"{pth.DATASET}/{pth.VARIANT}",
+        "n_train": int(len(ctx.training_df)),
+        "n_val": int(len(ctx.validation_df)),
+        "n_features": len(ctx.feat_cols),
+        "subset_fingerprint": getattr(xf, "ACTIVE_SUBSET_FINGERPRINT", None),
+        "subset_n": None if idx is None else int(len(idx)),
+        "subset_snapshot": ACTIVE_SUBSET_SNAPSHOT,
+        "feature_space_file": ctx.feature_space_file,
+        "feature_space_fingerprint": ctx.feature_space_fingerprint,
+        "faith_budgets": list(getattr(xf, "FAITH_BUDGETS", ())),
+        "q_clean": Q_CLEAN,
+        **knobs,
+    }
+
+
+def stamp_aggregate(path, run_ids, **knobs):
+    """Guard the name, then record what produced the table — one door, both duties.
+
+    They are separable only in the sense that a bug could separate them, which is how a
+    guarded aggregate would end up with no provenance beside it. Called BEFORE the write, so
+    `assert_same_population` still sees the file the previous population left.
+    """
+    assert_same_population(path, run_ids)
+    prov = {"n_runs": len(set(str(r) for r in run_ids)),
+            **aggregate_provenance(**knobs)}
+    with open(os.path.splitext(path)[0] + ".provenance.json", "w") as f:
+        json.dump(prov, f, indent=1, default=str)
+    return prov
+
+
 def assert_same_population(path, run_ids):
     """A cross-run aggregate never takes a name another population still holds.
 
@@ -780,7 +834,8 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         if len(faith):
             sfx = _sfx(faith)
             p = os.path.join(out_dir, f"faithfulness_aligned_signed{sfx}.csv")
-            assert_same_population(p, faith.run_id)
+            stamp_aggregate(p, faith.run_id, aggregate="faithfulness_aligned_signed",
+                            central=central, modes=list(SIGNED_MODES_REPORT))
             faith.to_csv(p, index=False); written.append(p)
             if central:
                 sel = faith[[central.get(i) == t
@@ -811,8 +866,8 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
                 ax.set_title(f"`{mo}`"); ax.grid(axis="y", alpha=.25)
             axes[0][0].set_ylabel(f"deletion gain_norm (q$\\leq${Q_CLEAN})")
             n_seed = sel.groupby("impl_name").size().min() if len(sel) else 0
-            fig.suptitle(f"Fedelta' tabellare allineata — {len(sel)} run, "
-                         f"{sel.impl_name.nunique()} famiglie, min {n_seed} seed", y=1.0)
+            fig.suptitle(f"Aligned tabular faithfulness — {len(sel)} runs, "
+                         f"{sel.impl_name.nunique()} families, min {n_seed} seeds", y=1.0)
             _finalize_plot(out_dir, f"faithfulness_by_family{sfx}.png")
             written.append(os.path.join(out_dir, f"faithfulness_by_family{sfx}.png"))
 
@@ -837,7 +892,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         if len(lore):
             sfx = _sfx(lore)
             p = os.path.join(out_dir, f"lore_sa_quality{sfx}.csv")
-            assert_same_population(p, lore.run_id)
+            stamp_aggregate(p, lore.run_id, aggregate="lore_sa_quality", central=central)
             lore.to_csv(p, index=False); written.append(p)
             lo = (drop_ablations(lore, "lore", verbose)
                   .groupby("impl_name")[["lore_coverage", "lore_coverage_5050",
@@ -876,7 +931,8 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         # from these two, so a population that is refused here never reaches them either.
         for df, name in ((shape, "xai_shape_metrics.csv"), (stab, "xai_stability.csv")):
             if len(df):
-                assert_same_population(os.path.join(out_dir, name), master.run_id)
+                stamp_aggregate(os.path.join(out_dir, name), master.run_id,
+                                aggregate=name, lore_idx=lore_idx)
         for df, name in ((shape, "xai_shape_metrics.csv"), (stab, "xai_stability.csv")):
             if len(df):
                 p = os.path.join(out_dir, name)

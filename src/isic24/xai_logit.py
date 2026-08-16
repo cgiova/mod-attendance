@@ -252,8 +252,8 @@ def _run_row(df):
     return dict(
         run_id=df["run_id"].iat[0], head_kind=df["head_kind"].iat[0],
         n_samples=len(df), n_positive_rows=int(pos.sum()),
-        # `read_explained_ids` e non la colonna a mano: i CSV gia' su disco portano
-        # `isic_id`, quelli nuovi `row_id`, e la lettura dei due sta in un posto solo.
+        # `read_explained_ids` rather than the column by hand: the CSVs already on disk carry
+        # `isic_id`, the new ones `row_id`, and one place reads both.
         n_unique_lesions=int(np.unique(xs.read_explained_ids(df)).size),
         image_head_dim=int(df["image_head_dim"].iat[0]),
         tabular_head_dim=int(df["tabular_head_dim"].iat[0]),
@@ -352,7 +352,8 @@ def decompose_study(master, art_path, subset_idx=None, central=None, overwrite=F
 
     out_dir = out_dir or os.path.join(art_path, "runs", xs.AGGREGATE_DIRNAME)
     os.makedirs(out_dir, exist_ok=True)
-    xs.assert_same_population(os.path.join(out_dir, AGG_BY_RUN), by_run.run_id)
+    xs.stamp_aggregate(os.path.join(out_dir, AGG_BY_RUN), by_run.run_id,
+                       aggregate=AGG_BY_RUN, central=central)
     by_run.to_csv(os.path.join(out_dir, AGG_BY_RUN), index=False)
     by_family.to_csv(os.path.join(out_dir, AGG_BY_FAMILY), index=False)
     return by_run, by_family, pd.concat(per_sample, ignore_index=True)
@@ -455,7 +456,8 @@ def gamma_curve(per_sample, art_path, master=None, deltas=DEFAULT_DELTAS, out_di
 
     out_dir = out_dir or os.path.join(art_path, "runs", xs.AGGREGATE_DIRNAME)
     os.makedirs(out_dir, exist_ok=True)
-    xs.assert_same_population(os.path.join(out_dir, GAMMA_BY_RUN), by_run.run_id)
+    xs.stamp_aggregate(os.path.join(out_dir, GAMMA_BY_RUN), by_run.run_id,
+                       aggregate=GAMMA_BY_RUN, deltas=list(deltas))
     by_run.to_csv(os.path.join(out_dir, GAMMA_BY_RUN), index=False)
     by_family.to_csv(os.path.join(out_dir, GAMMA_BY_FAMILY), index=False)
     return by_run, by_family

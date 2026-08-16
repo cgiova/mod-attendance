@@ -291,12 +291,12 @@ def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
         found = [("canonical", "abs", canonical), ("aligned", "abs", aligned)]
         if include_signed:
             # DOVE stanno le curve signed. Dal 01/08 le scrive `aligned_signed_faithfulness`
-            # dentro la run (`xai/shap_tab/`), sul campione a lesioni distinte: 110 run x 4
-            # modi = 440 file. La vecchia radice `_robustness/aligned_signed/` ne ha 24, di
-            # 6 run sul PREFISSO, scelte per convenienza — leggere quella significa
-            # pubblicare medie di famiglia con n_runs=1 su un campione superato.
-            # Per-run PRIMA, radice vecchia come fallback: cosi' una run gia' rifatta non
-            # viene mai letta dalla copia vecchia, e le run che non lo sono restano visibili.
+            # inside the run (`xai/shap_tab/`), on the distinct-lesion sample: 110 runs x 4
+            # modes = 440 files. The old root `_robustness/aligned_signed/` holds 24 of them,
+            # from 6 runs on the PREFIX, picked for convenience — reading it means publishing
+            # family means with n_runs=1 on a superseded sample.
+            # Per-run FIRST, the old root as a fallback: this way a run already redone is never
+            # read from the old copy, and the runs that are not stay visible.
             sdir_run = os.path.join(run_dir, "xai", "shap_tab")
             sdir_old = os.path.join(signed_root, str(r.run_id))
             for m in SIGNED_MODES:
@@ -315,23 +315,23 @@ def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
                 })
     out = pd.DataFrame(rows)
 
-    # Il fallback qui sopra e' comodo e ha un buco: se UNA run non avesse il file per-run,
-    # verrebbe pescata dalla radice vecchia — cioe' dal PREFISSO — e finirebbe nella stessa
-    # media di famiglia di 109 run sul campione a lesioni distinte, senza un errore. E' la
-    # forma di difetto che e' gia' costata due volte (`combined_faithfulness.csv` a 130
-    # righe, `lore_sa_quality` con due `pos_rate`). Qui non si indovina: si dice.
+    # The fallback above is convenient and has a hole: were ONE run to lack its per-run file,
+    # it would be taken from the old root — that is, from the PREFIX — and would land in the
+    # same family mean as 109 runs on the distinct-lesion sample, with no error. It is the
+    # shape of defect that has already cost twice (`combined_faithfulness.csv` at 130 rows,
+    # `lore_sa_quality` with two `pos_rate`). Nothing is guessed here: it is said.
     if len(out) and (out.source == "aligned_signed").any():
         sg = out[out.source == "aligned_signed"]
         per_run = sg.npz_path.str.contains(os.sep + "shap_tab" + os.sep)
         if per_run.any() and (~per_run).any():
             mixed = sorted(sg.loc[~per_run, "run_id"].unique())
             warnings.warn(
-                f"[CURVE FILES] le curve `aligned_signed` vengono da DUE campioni: "
-                f"{int(per_run.sum())} file dalle run (lesioni distinte) e "
-                f"{int((~per_run).sum())} da _robustness/aligned_signed (prefisso).\n"
-                f"  Run ancora sul prefisso: {mixed[:6]}{' ...' if len(mixed) > 6 else ''}\n"
-                f"  Mediarle insieme mescola due popolazioni. Rifare quelle run, oppure "
-                f"filtrare su `npz_path.str.contains('shap_tab')`.", RuntimeWarning,
+                f"[CURVE FILES] the `aligned_signed` curves come from TWO samples: "
+                f"{int(per_run.sum())} files from the runs (distinct lesions) and "
+                f"{int((~per_run).sum())} from _robustness/aligned_signed (prefix).\n"
+                f"  Runs still on the prefix: {mixed[:6]}{' ...' if len(mixed) > 6 else ''}\n"
+                f"  Averaging them together mixes two populations. Redo those runs, or "
+                f"filter on `npz_path.str.contains('shap_tab')`.", RuntimeWarning,
                 stacklevel=2)
     return out
 
@@ -600,9 +600,9 @@ def _build_faith_subset(subset_idx=None):
             imgs[subset_idx], labs[subset_idx])
 
 
-# Impronta del campione ATTIVO in questa sessione. `None` = comportamento storico (le prime
-# N righe). La imposta il notebook quando lavora su un campione stratificato, e da quel
-# momento `_load_shap_values` RIFIUTA gli npz che non la portano.
+# Fingerprint of the sample ACTIVE in this session. `None` = the historical behaviour (the
+# first N rows). The notebook sets it when working on a stratified sample, and from then on
+# `_load_shap_values` REFUSES any npz that does not carry it.
 ACTIVE_SUBSET_FINGERPRINT = None
 
 
@@ -612,21 +612,20 @@ def _load_shap_values(run_dir, best_epoch, model, raw_df, imgs):
     It does NOT recompute: `ShapEngine` lives in the training notebook and is deliberately not
     imported here, so a run with no SHAP on disk has no gradient ranking until one is generated.
 
-    GUARD SULL'IDENTITA' DEL CAMPIONE (2026-07-31). Gli npz salvano `explained_indices` come
-    POSIZIONI (0..127), non come ISIC id. Con un campione diverso dal prefisso quelle
-    posizioni indicano altre lesioni: `keep = ei < len(raw_df)` passa lo stesso, la
-    reindicizzazione riesce, e ne escono valori SHAP di una run applicati alle feature di
-    altri campioni. Nessun errore, nessun warning, numeri nell'ordine di grandezza giusto.
-    E' il modo piu' facile di ottenere un risultato plausibile e falso, quindi qui
-    l'assenza di stampigliatura e' un ERRORE, non un avviso: tutti gli npz canonici sono
-    senza, e sono esattamente quelli che non vanno riusati fuori dal prefisso.
+    SAMPLE IDENTITY GUARD (2026-07-31). The npz save `explained_indices` as POSITIONS
+    (0..127), not as ISIC ids. Under a sample other than the prefix those positions name other
+    lesions: `keep = ei < len(raw_df)` passes all the same, the reindexing succeeds, and out
+    come one run's SHAP values applied to another sample's features. No error, no warning,
+    numbers of the right order of magnitude. It is the easiest way to obtain a plausible and
+    false result, so a missing stamp is an ERROR here and not a notice: every canonical npz
+    lacks one, and they are exactly the ones that must not be reused outside the prefix.
     """
-    # DOVE cercare: con un campione adottato gli array giusti stanno in `xai/shap_tab/`
-    # (li scrive `ShapCallback` sotto lo stesso campione); `xai/shap/` tiene i canonici di
-    # giugno, che sono sul PREFISSO e senza stampigliatura — cioe' esattamente quelli che il
-    # guard qui sotto deve rifiutare. Cercare solo li' significava rifiutare sempre, anche
-    # dopo aver rigenerato SHAP correttamente. La scelta della cartella e' di `xai_driver`,
-    # in un posto solo, cosi' scrittura / protezione / lettura non possono divergere.
+    # WHERE to look: under an adopted sample the right arrays are in `xai/shap_tab/` (written
+    # by `ShapCallback` under that same sample); `xai/shap/` holds June's canonical ones, which
+    # are on the PREFIX and unstamped — that is, exactly the ones the guard below must refuse.
+    # Looking only there meant refusing always, even after regenerating SHAP correctly. The
+    # choice of folder belongs to `xai_driver`, in one place, so that writing, protecting and
+    # reading cannot diverge.
     from .xai_driver import shap_subdir
     shap_dir = os.path.join(run_dir, "xai", shap_subdir())
     cand = os.path.join(shap_dir, f"epoch_{int(best_epoch):03d}",
@@ -635,43 +634,40 @@ def _load_shap_values(run_dir, best_epoch, model, raw_df, imgs):
         hits = sorted(glob.glob(os.path.join(shap_dir, "epoch_*", "shap_arrays_epoch_*.npz")))
         cand = hits[-1] if hits else None
     if cand is None and shap_dir.endswith("shap_tab"):
-        # niente ancora sul campione: si ricade sul canonico, che il guard rifiutera' con
-        # il messaggio giusto invece di far finta che SHAP non esista e ricalcolarlo.
+        # nothing on the sample yet: fall back to the canonical one, which the guard refuses
+        # with the right message instead of pretending SHAP does not exist and recomputing it.
         hits = sorted(glob.glob(os.path.join(run_dir, "xai", "shap", "epoch_*",
                                              "shap_arrays_epoch_*.npz")))
         cand = hits[-1] if hits else None
-    if cand is not None and os.path.exists(cand) and globals().get("EVAL_IS_CANONICAL", True):
+    if cand is not None and os.path.exists(cand):
         d = np.load(cand)
         if ACTIVE_SUBSET_FINGERPRINT is not None:
             stamp = str(d["subset_fingerprint"]) if "subset_fingerprint" in d.files else None
             if stamp != ACTIVE_SUBSET_FINGERPRINT:
                 raise RuntimeError(
                     f"[SUBSET GUARD] {cand}\n"
-                    f"  impronta dell'npz: {stamp or 'ASSENTE (= prefisso, artefatto canonico)'}\n"
-                    f"  impronta attiva:   {ACTIVE_SUBSET_FINGERPRINT}\n"
-                    f"  `explained_indices` sono POSIZIONI: riusarle su un campione diverso\n"
-                    f"  accoppia i valori SHAP di queste righe alle feature di ALTRE lesioni,\n"
-                    f"  senza errore e con numeri plausibili. Due uscite legittime:\n"
-                    f"    * l'attributore ALLINEATO, che non legge nulla da disco:\n"
-                    f"      xf.aligned_signed_faithfulness(..., subset_idx=..., out_dir=...)\n"
-                    f"      — 67 s/run a n=128, misurato su 110 run;\n"
-                    f"    * rigenerare SHAP sul campione nuovo scrivendo gli npz con\n"
-                    f"      subset_fingerprint={ACTIVE_SUBSET_FINGERPRINT!r} (fuori dalle run canoniche).\n"
-                    f"  Per tornare al prefisso: xf.ACTIVE_SUBSET_FINGERPRINT = None.")
+                    f"  npz fingerprint:    {stamp or 'ABSENT (= prefix, canonical artifact)'}\n"
+                    f"  active fingerprint: {ACTIVE_SUBSET_FINGERPRINT}\n"
+                    f"  `explained_indices` are POSITIONS: reusing them on a different sample\n"
+                    f"  pairs the SHAP values of these rows with the features of OTHER lesions,\n"
+                    f"  with no error and with plausible numbers. Two legitimate ways out:\n"
+                    f"    * the ALIGNED attributor, which reads nothing from disk:\n"
+                    f"      xf.aligned_signed_faithfulness(..., subset_idx=..., out_dir=...);\n"
+                    f"    * regenerate SHAP on the new sample, writing the npz with\n"
+                    f"      subset_fingerprint={ACTIVE_SUBSET_FINGERPRINT!r} (outside the canonical runs).\n"
+                    f"  To go back to the prefix: xf.ACTIVE_SUBSET_FINGERPRINT = None.")
         sv = np.asarray(d["shap_values"])
         if sv.ndim == 3:
             sv = sv[..., 0] if sv.shape[-1] == 1 else sv[:, 0, :]
         ei = np.asarray(d["explained_indices"]).astype(int).ravel()
         keep = ei < len(raw_df)
         return sv[keep], ei[keep]
-    # ---- saved SHAP arrays unavailable / not applicable ----
-    # This lean notebook REUSES the per-sample SHAP arrays saved at training time, keyed to the
-    # CANONICAL fold-0 ordering. They are skipped when EVAL_IS_CANONICAL is False (a custom eval
-    # set would misalign them). Recomputing SHAP needs ShapEngine (training notebook, cell 24),
-    # intentionally not imported here.
+    # ---- saved SHAP arrays unavailable ----
+    # The per-sample arrays are READ here and never recomputed: their producer is the SHAP engine,
+    # which runs over the same sample before any faithfulness pass.
     raise FileNotFoundError(
-        f"tabular SHAP faithfulness unavailable for {shap_dir} (missing arrays, or non-canonical "
-        f"EVAL_SET). Use methods=('image',) on a custom set, or regenerate SHAP in the training notebook.")
+        f"tabular SHAP faithfulness unavailable for {shap_dir}: no saved arrays for this run. "
+        f"Run the SHAP engine over it first, or ask for methods=('image',).")
 
 
 def _persample_raw_importance(shap_values):
@@ -1024,8 +1020,8 @@ def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
 # `explanation_faithfulness` always scores "removal lowers the logit" as good, so the
 # negev curve is anti-faithful BY CONSTRUCTION unless its gain is negated.  We negate it
 # and say so in the column name (`..._negev_signflipped`).  This is precisely the defect
-# REPORT sec.7.5 diagnoses: "rimuovere evidenza contro la classe puo' aumentare
-# correttamente il logit e venire contato come anti-fedelta'".
+# REPORT sec.7.5 diagnoses: "removing evidence against the class may correctly raise the
+# logit and be counted as anti-faithfulness".
 
 ALIGNED_MAX_EVALS_PER_FEATURE = 2   # Permutation: exact antithetic pass -> 2*n_feat + 1
 
@@ -1332,16 +1328,15 @@ def aligned_signed_faithfulness(model, run_dir, best_epoch, phi=None, labels=Non
 
 
 def _write_aligned_signed_summary(out_dir, out_prefix, modes, labels):
-    """UNA riga per modo, in un CSV leggibile — il gemello di `shap_summary.csv`.
+    """ONE row per mode, in a readable CSV — the twin of `shap_summary.csv`.
 
-    Prima qui c'era una figura delle curve, per ogni run. Su 110 run erano 110 PNG che
-    nessuno apre e 34 MB, e le curve di UNA run non si confrontano con niente: il confronto
-    fra famiglie lo fa `xs.report()`. Quello che serve per run e' invece un punto d'ingresso
-    leggibile senza aprire quattro JSON — che e' esattamente cio' che `xai/shap/` aveva e
-    `xai/shap_tab/` no.
+    There used to be a figure of the curves here, one per run. Over 110 runs that was 110 PNGs
+    nobody opens and 34 MB, and ONE run's curves compare with nothing: the cross-family
+    comparison is `xs.report()`. What a run needs instead is an entry point readable without
+    opening four JSON files — exactly what `xai/shap/` had and `xai/shap_tab/` did not.
 
-    I gain sono RICALCOLATI dalle curve con `mode_sign` + `persample_gains`: mai letti dallo
-    scalare grezzo del JSON, che e' PRE-convenzione di segno.
+    The gains are RECOMPUTED from the curves with `mode_sign` + `persample_gains`: never read
+    from the raw scalar of the JSON, which is PRE sign convention.
     """
     import pandas as pd
     rows = []

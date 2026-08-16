@@ -1,14 +1,14 @@
-"""Dove stanno dati e artefatti, per QUALUNQUE dataset della pipeline.
+"""Where data and artifacts live, for ANY dataset of the pipeline.
 
-La radice di un dataset ha due segmenti — ``<dataset>/<variante>`` — ed e' la stessa forma
-per dati e artefatti:
+A dataset root has two segments — ``<dataset>/<variant>`` — and the shape is the same for
+data and for artifacts:
 
     data/isic24/enhanced/...        artifacts/isic24/enhanced/...
-    data/brset/<variante>/...       artifacts/brset/<variante>/...
+    data/brset/<variant>/...        artifacts/brset/<variant>/...
 
-Nessun modulo compone questi percorsi a mano: chi ha bisogno di una radice la chiede qui.
-E' l'unico posto in cui compare il nome di un dataset, e ci compare come DEFAULT, non come
-costante cablata.
+No module composes these paths by hand: whoever needs a root asks for it here. This is the
+only place a dataset name appears, and it appears as a DEFAULT, not as a hard-wired
+constant.
 """
 
 from __future__ import annotations
@@ -18,19 +18,19 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Il dataset attivo. Si cambia da ambiente o passando `dataset=`/`variant=` alle funzioni:
-# il codice a valle non deve mai saperlo.
+# The active dataset. Changed from the environment or by passing `dataset=`/`variant=` to the
+# functions: downstream code must never know it.
 DATASET = os.environ.get("DUM_DATASET", "isic24")
 VARIANT = os.environ.get("DUM_VARIANT", "enhanced")
 
-# Il segmento da cui comincia l'albero delle run dentro una radice di dataset. E' struttura
-# NOSTRA, uguale su ogni dataset, ed e' cio' che permette di ri-radicare un `run_dir` senza
-# sapere come si chiama la cartella del dataset (cfr. `run_dir_abs`).
+# The segment the run tree starts at inside a dataset root. It is OUR structure, the same on
+# every dataset, and it is what makes a `run_dir` re-rootable without knowing what the dataset
+# folder is called (cf. `run_dir_abs`).
 RUNS_DIRNAME = "runs"
 
 
 def _env_root(*names):
-    """Il primo path non vuoto fra queste variabili d'ambiente, o ``None``."""
+    """The first non-empty path among these environment variables, or ``None``."""
     for n in names:
         p = os.environ.get(n)
         if p:
@@ -39,35 +39,35 @@ def _env_root(*names):
 
 
 def get_base() -> Path:
-    """Radice del repo, da cui derivano dati e artefatti se non sono spostati altrove."""
+    """Repository root, which data and artifacts derive from unless moved elsewhere."""
     return _env_root("DUM_BASE", "ISIC24_BASE") or REPO_ROOT
 
 
 def get_data_root() -> Path:
-    """Radice di TUTTI i dati (dentro ci sono i dataset)."""
+    """Root of ALL data (the datasets live inside it)."""
     return _env_root("DUM_DATA_DIR", "ISIC24_DATA_DIR") or (get_base() / "data").resolve()
 
 
 def get_artifacts_root() -> Path:
-    """Radice di TUTTI gli artefatti (dentro ci sono i dataset)."""
+    """Root of ALL artifacts (the datasets live inside it)."""
     return (_env_root("DUM_ARTIFACT_DIR", "ISIC24_ARTIFACT_DIR")
             or (get_base() / "artifacts").resolve())
 
 
 def dataset_root(root: Path, dataset=None, variant=None) -> Path:
-    """``<root>/<dataset>/<variante>``."""
+    """``<root>/<dataset>/<variant>``."""
     dataset = DATASET if dataset is None else dataset
     variant = VARIANT if variant is None else variant
     return (Path(root) / dataset / variant).resolve()
 
 
 def data_dir(dataset=None) -> Path:
-    """Livello DATASET dei dati: le immagini (hdf5) stanno qui, non nella variante."""
+    """DATASET level of the data: the images (hdf5) live here, not in the variant."""
     return (get_data_root() / (DATASET if dataset is None else dataset)).resolve()
 
 
 def data_path(dataset=None, variant=None) -> Path:
-    """Livello VARIANTE dei dati: i metadati della variante attiva."""
+    """VARIANT level of the data: the metadata of the active variant."""
     return dataset_root(get_data_root(), dataset, variant)
 
 
@@ -76,21 +76,21 @@ def art_path(dataset=None, variant=None) -> Path:
 
 
 def run_dir_abs(run_dir, art_root) -> str:
-    """Ri-radica un `run_dir` letto da un CSV sull'albero degli artefatti LOCALE.
+    """Re-root a `run_dir` read from a CSV onto the LOCAL artifact tree.
 
-    I CSV di riepilogo portano `run_dir` come percorso ASSOLUTO della macchina che ha fatto
-    il training — `/home/claudio/isic24-dum/artifacts/enhanced/runs/...` — che altrove non
-    esiste. Del percorso conta solo la parte da `runs/` in poi: e' l'unico pezzo che
-    appartiene alla pipeline invece che alla macchina o al nome del dataset.
+    The summary CSVs carry `run_dir` as an ABSOLUTE path of the machine that did the training
+    — `/home/claudio/isic24-dum/artifacts/enhanced/runs/...` — which exists nowhere else. Only
+    the part from `runs/` onwards matters: it is the one piece that belongs to the pipeline
+    rather than to the machine or to the dataset name.
 
-    Un percorso senza `runs/` SOLLEVA. Prima si tornava il path intero della macchina di
-    origine, cioe' un `File not found` su un percorso che sembra giusto.
+    A path without `runs/` RAISES. It used to return the originating machine's whole path,
+    that is a `File not found` on a path that looks right.
     """
-    if str(run_dir).startswith(str(art_root)):   # gia' locale: niente da ri-radicare
+    if str(run_dir).startswith(str(art_root)):   # already local: nothing to re-root
         return str(run_dir)
     parts = Path(str(run_dir)).parts
     if RUNS_DIRNAME not in parts:
         raise ValueError(
-            f"run_dir senza segmento {RUNS_DIRNAME!r}, non ri-radicabile: {run_dir!r}")
+            f"run_dir carries no {RUNS_DIRNAME!r} segment, not re-rootable: {run_dir!r}")
     tail = parts[parts.index(RUNS_DIRNAME):]
     return os.path.join(str(art_root), *tail)

@@ -62,7 +62,7 @@ def _rule_text(rule, max_premises=12):
     if len(prem) > max_premises:
         parts.append(f"... (+{len(prem) - max_premises})")
     cons = rule.get("consequence") or {}
-    head = " AND ".join(parts) if parts else "<nessuna premessa>"
+    head = " AND ".join(parts) if parts else "<no premise>"
     return f"IF {head} THEN {cons.get('attr', 'target')} {cons.get('op', '=')} {cons.get('val')}"
 
 
@@ -102,14 +102,14 @@ def degeneracy_warning(stats, min_unique_frac=0.5):
     if not stats:
         return None
     if stats.get("neigh_n_classes", 2) < 2:
-        return ("vicinato MONO-CLASSE: il surrogato non ha niente da separare, quindi "
-                "`fidelity` e `rule_len` non misurano la qualita' della spiegazione.")
+        return ("MONO-CLASS neighbourhood: the surrogate has nothing to separate, so "
+                "`fidelity` and `rule_len` do not measure the quality of the explanation.")
     uf = stats.get("neigh_unique_frac")
     if uf is not None and uf < min_unique_frac:
-        return (f"vicinato SATURO DI DUPLICATI: solo {uf:.0%} di righe distinte, la piu' "
-                f"frequente vale il {stats['neigh_top_frac']:.0%} del totale. Un albero le "
-                f"separa con un taglio solo, quindi `rule_len` risulta corto e la fedelta' "
-                f"in-sample risulta ~1.0 per costruzione.")
+        return (f"neighbourhood SATURATED WITH DUPLICATES: only {uf:.0%} distinct rows, the "
+                f"most frequent one worth {stats['neigh_top_frac']:.0%} of the total. A tree "
+                f"separates them with a single cut, so `rule_len` comes out short and "
+                f"in-sample fidelity comes out at ~1.0 by construction.")
     return None
 
 
@@ -298,7 +298,7 @@ class LoreEngineSA:
         26% distinct rows, one row worth 74% of the total, `rule_len = 0`.  Measured
         (vanilla seed_47, 2 samples, `num_instances=1000`):
 
-            mutpb  init   unique_frac   pos-rate del vicinato   rule_len   fid_cv_bacc
+            mutpb  init   unique_frac   neighbourhood pos-rate   rule_len   fid_cv_bacc
             .2     --          0.260                    0.000        0.0          n/d
             .35    --          0.483                    0.389        1.5        0.926
             .5     --          0.694                    0.324        2.0        0.898
@@ -312,8 +312,8 @@ class LoreEngineSA:
         the label.  ``mutpb=.5`` + ``init_mutpb=.3`` is the best joint point measured --
         2.9x the diversity of upstream, the longest rules, and 19% extra cost.
 
-        Pass ``mutpb=None, init_mutpb=None`` for `lore_sa`'s own behaviour (what
-        `bench_lore.py`'s timing numbers were measured with).
+        Pass ``mutpb=None, init_mutpb=None`` for `lore_sa`'s own behaviour, the upstream
+        baseline the table above is measured against.
 
         ``gen_kwargs``: further attributes pushed onto the generator after construction, e.g.
         ``{"mutpb": 0.5, "ngen": 50}``.  The convenience explainers build the generator
@@ -345,12 +345,12 @@ class LoreEngineSA:
         self.threshold = threshold
         self.random_state = random_state
         self.gen_kwargs = dict(gen_kwargs or {})
-        # `mutpb` e `init_mutpb` sono leve del solo generatore genetico: `RandomGenerator`
-        # non ha ne' l'attributo ne' `record_init`, e passarglieli farebbe alzare
-        # l'AttributeError del guard in `_make_explainer` per un default che non ha chiesto.
+        # `mutpb` and `init_mutpb` are levers of the genetic generator alone: `RandomGenerator`
+        # has neither the attribute nor `record_init`, and passing them would raise the guard's
+        # AttributeError in `_make_explainer` over a default it never asked for.
         if neigh_type == "genetic":
             if mutpb is not None:
-                self.gen_kwargs.setdefault("mutpb", mutpb)   # gen_kwargs esplicito ha la precedenza
+                self.gen_kwargs.setdefault("mutpb", mutpb)   # an explicit gen_kwargs wins
             self.init_mutpb = init_mutpb
         else:
             self.init_mutpb = None
@@ -375,8 +375,8 @@ class LoreEngineSA:
         for k, v in self.gen_kwargs.items():
             if not hasattr(expl.generator, k):
                 raise AttributeError(
-                    f"gen_kwargs: il generatore {type(expl.generator).__name__} non ha "
-                    f"l'attributo {k!r} -- un refuso qui verrebbe ignorato in silenzio.")
+                    f"gen_kwargs: the generator {type(expl.generator).__name__} has no "
+                    f"attribute {k!r} -- a typo here would be ignored silently.")
             setattr(expl.generator, k, v)
         if self.init_mutpb is not None and hasattr(expl.generator, "record_init"):
             _diversify_init(expl.generator, self.init_mutpb)
@@ -441,7 +441,7 @@ class LoreEngineSA:
                 cv = f"{r['fid_cv_bacc']:.3f}" if r["fid_cv_bacc"] is not None else "n/d"
                 print(f"  [{i+1}/{n}] {dt/60:.2f} min | rule_len={r['rule_len']} "
                       f"| fid in-sample={r['fid_insample']} cv_bacc={cv} "
-                      f"| vicinato {r.get('neigh_unique', '?')}/{r.get('neigh_rows', '?')} distinte"
+                      f"| neigh {r.get('neigh_unique', '?')}/{r.get('neigh_rows', '?')} distinct"
                       f"{' | ' + err if err else ''}", flush=True)
                 if r["warning"]:
                     print(f"        ⚠ {r['warning']}", flush=True)
@@ -468,8 +468,8 @@ class LoreEngineSA:
             "n_errors": int(df.error.notna().sum()),
         }
         if verbose and stats["n_degenerate"]:
-            print(f"\n  ⚠ {stats['n_degenerate']}/{len(df)} vicinati degeneri: le colonne di "
-                  f"fedelta' su quei campioni non sono interpretabili.", flush=True)
+            print(f"\n  ! {stats['n_degenerate']}/{len(df)} degenerate neighbourhoods: the "
+                  f"fidelity columns on those samples are not interpretable.", flush=True)
         return stats, df
 
 
@@ -497,8 +497,8 @@ def _lore_sa_callback_cls():
             self.max_samples = int(max_samples)
             self.max_batches = max_batches
             self.rng_seed = int(rng_seed)
-            # subset_idx: indici POSIZIONALI in validation_df. None = comportamento storico
-            # (le prime N righe), che NON e' un campione casuale -- vedi isic24.xai_subset.
+            # subset_idx: POSITIONAL indices in validation_df. None = the historical behaviour
+            # (the first N rows), which is NOT a random sample -- see isic24.xai_subset.
             self.subset_idx = None if subset_idx is None else np.asarray(subset_idx, int)
             self.base_dir = Path(base_dir)
             self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -509,9 +509,9 @@ def _lore_sa_callback_cls():
                 to_feature_dict=to_feature_dict, training_df=training_df, **engine_kw)
 
         def _freeze_batch(self, ds):
-            # Con subset_idx si legge fino alla posizione piu' alta richiesta e poi si
-            # indicizza: max_batches/max_samples sono tarati sul prefisso e taglierebbero
-            # via i campioni alti del campione stratificato.
+            # With subset_idx, read up to the highest position asked for and then index:
+            # max_batches/max_samples are calibrated on the prefix and would cut away the high
+            # samples of the stratified one.
             want = None if self.subset_idx is None else int(self.subset_idx.max()) + 1
             imgs, labels, n = [], [], 0
             for b_idx, (x, y) in enumerate(ds):
@@ -527,15 +527,15 @@ def _lore_sa_callback_cls():
                 labels.append(np.asarray(y)[:take].reshape(-1))
                 n += imgs[-1].shape[0]
             if n == 0:
-                raise RuntimeError("nessun campione raccolto per LORE.")
+                raise RuntimeError("no sample collected for LORE.")
             self._images = np.concatenate(imgs)
             self._labels = np.concatenate(labels)
             self._raw_df = self.raw_feature_df.iloc[:n][self.feat_cols].reset_index(drop=True)
             if self.subset_idx is not None:
                 if n < want:
                     raise RuntimeError(
-                        f"validation_ds ha dato {n} campioni ma il subset ne chiede fino a "
-                        f"{want}: il campione non e' applicabile a questo dataset.")
+                        f"validation_ds gave {n} samples but the subset asks for up to "
+                        f"{want}: the sample does not apply to this dataset.")
                 self._images = self._images[self.subset_idx]
                 self._labels = self._labels[self.subset_idx]
                 self._raw_df = (self._raw_df.iloc[self.subset_idx]
@@ -550,25 +550,24 @@ def _lore_sa_callback_cls():
             from .xai_engines import append_epoch_row
             np.random.seed(self.rng_seed)
             epoch_name = f"epoch{epoch:03d}"
-            # `base_dir` e' gia' `<run_dir>/xai/lore_sa/` (2026-08-01): il livello
-            # `tabular_sa/` che c'era qui sotto distingueva questo motore dal legacy quando
-            # i due condividevano `xai/lore/`, e ora e' ridondante.
+            # `base_dir` is already `<run_dir>/xai/lore_sa/` (2026-08-01): the `tabular_sa/`
+            # level that used to sit below told this engine from the legacy one when the two
+            # shared `xai/lore/`, and is now redundant.
             out_dir = self.base_dir / epoch_name
 
-            # La directory si crea DOPO il calcolo, non prima: `explain` dura ~20 minuti e
-            # un'interruzione lasciava una directory vuota che il write guard poi
-            # scambiava per un artefatto, bloccando la ri-esecuzione. Il guard ora ignora le
-            # dir vuote (`xai_driver._is_artifact`); questo evita di crearle del tutto.
-            # DOVE gira. Il ciclo caldo di LORE non e' la CNN: l'encoder immagine gira UNA
-            # volta per run (`img_enc.predict` su tutti i campioni), poi le ~1000
-            # valutazioni per istanza del vicinato genetico passano solo per la TESTA, una
-            # densa piccola. Il resto — algoritmo genetico, albero di decisione, regole — e'
-            # CPU puro. Quindi LORE occupa la GPU per 23 minuti a run senza usarla quasi:
-            # su una macchina condivisa e' 42 ore di GPU tenuta ferma.
-            #   xai_driver.LORE_SA_DEVICE = "/CPU:0"  la sposta sulla CPU
-            #   None                                   lascia decidere Keras (= GPU se c'e')
-            # NB il modo pulito resta lanciare il processo con CUDA_VISIBLE_DEVICES="":
-            # `tf.device` non sposta le variabili gia' allocate, le copia a ogni chiamata.
+            # The directory is created AFTER the computation, not before: `explain` is long and
+            # an interruption used to leave an empty directory the write guard then mistook for
+            # an artifact, blocking the re-run. The guard now ignores empty dirs
+            # (`xai_driver._is_artifact`); this avoids creating them at all.
+            # WHERE it runs. LORE's hot loop is not the CNN: the image encoder runs ONCE per run
+            # (`img_enc.predict` over every sample), then the genetic neighbourhood's per-instance
+            # evaluations go through the HEAD alone, a small dense one. The rest — genetic
+            # algorithm, decision tree, rules — is pure CPU. So LORE holds the GPU for the length
+            # of a run while barely using it, which on a shared machine is a card kept idle.
+            #   xai_driver.LORE_SA_DEVICE = "/CPU:0"  moves it to the CPU
+            #   None                                   lets Keras decide (= GPU when there is one)
+            # NB the clean way is still launching the process with CUDA_VISIBLE_DEVICES="":
+            # `tf.device` does not move variables already allocated, it copies them every call.
             from . import xai_driver as _xd
             _dev = getattr(_xd, "LORE_SA_DEVICE", None)
             import contextlib
@@ -580,22 +579,21 @@ def _lore_sa_callback_cls():
 
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            # Le regole per esteso: il legacy le scrive, e senza di queste `rule_len` resta
-            # un numero che non si puo' controllare.
+            # The rules in full: without them `rule_len` stays a number nobody can check.
             with open(out_dir / f"lore_sa_rules_{epoch_name}.txt", "w") as f:
                 for _, r in df.iterrows():
                     f.write(f"[inst {int(r['i']):02d}] label={r.get('true_label')} "
-                            f"classe_regola={r.get('rule_class')}\n  {r.get('rule_text')}\n\n")
-            # L'indice POSIZIONALE in validation_df di ogni campione spiegato. Senza, la
-            # colonna `i` (posizione dentro il campione LORE) e' l'unica traccia, e coincide
-            # con l'indice vero solo se il campione era il prefisso — cosa che dal 01/08 non
-            # e' piu' vera. Serve a chiunque debba riallineare LORE con SHAP o la fedelta'
+                            f"rule_class={r.get('rule_class')}\n  {r.get('rule_text')}\n\n")
+            # The POSITIONAL index in validation_df of every explained sample. Without it the
+            # column `i` (position inside the LORE sample) is the only trace, and it coincides
+            # with the true index only if the sample was the prefix — which since 01/08 it is
+            # not. It is what anyone realigning LORE with SHAP or with faithfulness needs
             # (`xai_metrics.shap_lore_agreement`).
             if self.subset_idx is not None and len(self.subset_idx) >= len(df):
                 from . import xai_subset as xs
                 vi = np.asarray(self.subset_idx, int)[:len(df)]
                 df.insert(1, "val_index", vi)
-                for k, v in xs.stamp_row_ids(vi).items():   # l'identita', se il fold e' noto
+                for k, v in xs.stamp_row_ids(vi).items():   # the identity, when the fold is known
                     df.insert(1, k, v)
             df.to_csv(out_dir / f"lore_sa_persample_{epoch_name}.csv", index=False)
 
@@ -606,16 +604,16 @@ def _lore_sa_callback_cls():
                 "lore_sa_neigh_unique_frac": stats.get("neigh_unique_frac_mean"),
                 "lore_sa_neigh_pos_rate": stats.get("neigh_pos_rate_mean"),
                 "lore_sa_n_degenerate": stats.get("n_degenerate"),
-                # copertura: su quanti campioni la spiegazione e' interpretabile. Va
-                # RIPORTATA, non assunta -- misurato che con l'immagine congelata una parte
-                # dei campioni ha un vicinato mono-classe qualunque sia il generatore.
+                # coverage: on how many samples the explanation is interpretable. It is to be
+                # REPORTED, not assumed -- measured that with the image frozen a share of the
+                # samples has a mono-class neighbourhood whatever the generator.
                 "lore_sa_coverage": (1 - stats.get("n_degenerate", 0) / max(1, len(df))),
             }
-            # Metrica di FORMA (leggibilita'), calcolata qui e non da una cella a valle:
-            # `rule_len` normalizzato sul numero di feature, con le regole VUOTE escluse
-            # invece che contate come "compattissime". La formula ingenua
-            # `1 - (|R|-1)/(d-1)` su una regola vuota da' 1.0079 — fuori range e massima,
-            # cioe' il punteggio migliore a chi non ha spiegato niente.
+            # A SHAPE metric (readability), computed here and not by a cell downstream:
+            # `rule_len` normalised over the number of features, with EMPTY rules excluded
+            # instead of counted as "maximally compact". The naive formula
+            # `1 - (|R|-1)/(d-1)` on an empty rule gives 1.0079 — out of range and maximal,
+            # that is the best score to whoever explained nothing.
             from .xai_metrics import lore_shape_from_df
             _shape = lore_shape_from_df(df, d_raw=len(self.feat_cols)) or {}
             self.last_quality.update({

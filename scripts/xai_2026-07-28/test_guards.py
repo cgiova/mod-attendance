@@ -321,66 +321,6 @@ if os.path.isdir(os.path.join(ART, "runs")):
 else:
     print("  (artifacts unavailable: section skipped)")
 
-# ======================================================================= 10 ===
-section("10. [EVAL GUARD] — and the blind spot on the adopted sample")
-from isic24.eval_guard import assert_canonical_eval                # noqa: E402
-
-
-def _ns(**kw):
-    return dict({"EVAL_SET": "canonical", "FAITH_N_SAMPLES": 128,
-                 "validation_df": None, "_val_snap": "/nonexistent"}, **kw)
-
-
-def _call(ns, **kw):
-    return assert_canonical_eval(ns, require_snapshot=False, **kw)
-
-
-_pf, _pi = xf.ACTIVE_SUBSET_FINGERPRINT, getattr(xf, "FAITH_SUBSET_IDX", None)
-try:
-    xf.FAITH_SUBSET_IDX, xf.ACTIVE_SUBSET_FINGERPRINT = None, None
-    ok, msg = raises(lambda: _call(_ns(EVAL_SET="custom", EVAL_FOLDS=[1, 2])))
-    check("A. EVAL_SET custom -> raises", ok, msg)
-    ok, msg = raises(lambda: _call(_ns(FAITH_N_SAMPLES=256)))
-    check("B. FAITH_N_SAMPLES different -> raises", ok, msg)
-    ok_c, msg_c = raises(lambda: _call(_ns()))
-    check("C. canonical regime -> does not raise", not ok_c, msg_c)
-
-    # the blind spot: `xs.adopt` installs a GLOBAL default the guard never looked at
-    xf.FAITH_SUBSET_IDX = list(range(144))
-    xf.ACTIVE_SUBSET_FINGERPRINT = "unique-equal-s0-n144-TEST"
-    ok, msg = raises(lambda: _call(_ns()))
-    check("D. ADOPTED sample -> raises (this was the blind spot)", ok, msg)
-    ok_e, msg_e = raises(lambda: _call(_ns(), allow_subset=True))
-    check("E. allow_subset=True -> passes", not ok_e, msg_e)
-    d = _call(_ns(), allow_subset=True)
-    check("F. the descriptor reports the sample", d.get("adopted_subset_n") == 144,
-          f"adopted_subset_n={d.get('adopted_subset_n')}")
-
-    # The snapshot: the policy depends on WHO wrote it. Since 2026-08-06 the one on disk
-    # comes from the retraining (`source='training_run'`), so the branch that matters raises.
-    xf.FAITH_SUBSET_IDX, xf.ACTIVE_SUBSET_FINGERPRINT = None, None
-    _vdf = pd.DataFrame({"isic_id": [f"ISIC_{i:07d}" for i in range(10)]})
-
-    def _snap_ns(source, ids):
-        path = os.path.join(TMP, f"snap_{source}.json")
-        import json as _json
-        _json.dump({"seed": 49, "n": len(ids), "source": source, "isic_ids_sorted": sorted(ids)},
-                   open(path, "w"))
-        return _ns(validation_df=_vdf, _val_snap=path)
-
-    _same = _vdf.isic_id.tolist()
-    _other = [f"ISIC_{i:07d}" for i in range(1, 11)]
-    ok, msg = raises(lambda: _call(_snap_ns("training_run", _other)))
-    check("G. snapshot from a training run + different set -> RAISES", ok, msg)
-    ok_h, msg_h = raises(lambda: _call(_snap_ns("posthoc_regen_2026-07-28", _other)))
-    check("H. post-hoc regenerated snapshot + different set -> warns, does not raise", not ok_h, msg_h)
-    d = _call(_snap_ns("training_run", _same))
-    check("I. snapshot from a training run + same set -> passes and records it",
-          d.get("snapshot_match") is True and d.get("snapshot_source") == "training_run",
-          f"match={d.get('snapshot_match')}, source={d.get('snapshot_source')}")
-finally:
-    xf.ACTIVE_SUBSET_FINGERPRINT, xf.FAITH_SUBSET_IDX = _pf, _pi
-
 # ======================================================================= 11 ===
 section("11. VALIDATION IDENTITY — the frame every run is held out from, and its order")
 # Rewritten 2026-08-11. Until TR-06 this section asked whether today's validation was the one
@@ -1751,15 +1691,70 @@ check("E2. and the same pair table against another population still raises", ok_
 _srcF = _inspect28.getsource(xs.report)
 check("F. every aggregate xs.report writes is guarded, and the shape tables are cleared "
       "before either of them is written",
-      _srcF.count("assert_same_population") == 3
-      and _srcF.rindex("assert_same_population") < _srcF.index("df.to_csv(p, index=False)"),
-      f"{_srcF.count('assert_same_population')} call sites in xs.report")
+      _srcF.count("stamp_aggregate") == 3
+      and _srcF.rindex("stamp_aggregate") < _srcF.index("df.to_csv(p, index=False)"),
+      f"{_srcF.count('stamp_aggregate')} call sites in xs.report")
 
 _srcG = _inspect28.getsource(xmet.stability_table)
 check("G. the pair table the guard has to read now carries run ids",
       "run_id_a=" in _srcG and "run_id_b=" in _srcG
       and {"run_id_a", "run_id_b"} <= set(_st32.columns),
       f"{[c for c in _st32.columns if c.startswith('run_id')]}")
+
+# PH-11. `run_id` says WHICH runs a table holds. It cannot say under which SAMPLE and which
+# knobs their numbers were produced -- that lived only in notebook output, recoverable by
+# opening the runs one by one. The provenance travels with the guard because the two are one
+# act: a table that names its population and not its origin is half-identified.
+import json as _js33                                                     # noqa: E402
+
+_ctx0_33, _fp0_33, _idx0_33 = xf._CTX, xf.ACTIVE_SUBSET_FINGERPRINT, xf.FAITH_SUBSET_IDX
+_snap0_33, _vids0_33 = xs.ACTIVE_SUBSET_SNAPSHOT, xs.VALIDATION_ROW_IDS
+try:
+    _vdf33 = pd.DataFrame({"isic_id": [f"ISIC_{i:07d}" for i in range(8)],
+                           "target": [0, 1] * 4})
+    xf.configure(xf.XaiContext(
+        feat_cols=["a", "b"], training_df=pd.DataFrame({"a": range(20)}),
+        validation_df=_vdf33, validation_ds=None, feature_space=None,
+        to_feature_dict=None, encoded_feature_names=["a", "b"],
+        feature_space_file="feature_space/20260810-192622", feature_space_fingerprint="ab12cd34"))
+    xf.ACTIVE_SUBSET_FINGERPRINT, xf.FAITH_SUBSET_IDX = "unique-equal-s0-n144", list(range(144))
+    xs.ACTIVE_SUBSET_SNAPSHOT = "/art/subset.unique-equal.n144.seed0.json"
+
+    _tbl33 = agg_csv("provenance.csv", _canon)
+    _prov33 = xs.stamp_aggregate(_tbl33, _canon, aggregate="provenance.csv", central=None)
+    _side33 = os.path.splitext(_tbl33)[0] + ".provenance.json"
+    _read33 = _js33.load(open(_side33))
+    check("H. the aggregate says what produced it, beside the table and under its own name: "
+          "the sample, its snapshot and the feature space — the three things run_id cannot say",
+          os.path.exists(_side33)
+          and _read33["subset_fingerprint"] == "unique-equal-s0-n144"
+          and _read33["subset_n"] == 144
+          and _read33["subset_snapshot"].endswith("n144.seed0.json")
+          and _read33["feature_space_fingerprint"] == "ab12cd34"
+          and _read33["n_runs"] == 132,
+          f"{os.path.basename(_side33)}: {_read33['subset_fingerprint']}, "
+          f"n={_read33['subset_n']}, {_read33['n_runs']} runs")
+
+    check("I. the knobs the caller passes are part of it, so two tables computed the same way "
+          "over the same runs are still told apart by what was asked of them",
+          _read33["aggregate"] == "provenance.csv" and "central" in _read33
+          and _read33["q_clean"] == xs.Q_CLEAN,
+          f"aggregate={_read33['aggregate']}, q_clean={_read33['q_clean']}")
+
+    xf._CTX = xf._Unconfigured()
+    _okj, _msgj = raises(lambda: xs.aggregate_provenance())
+    check("J. an unconfigured session RAISES instead of writing a table nobody can trace back "
+          "to a sample — the sentinel answers, no branch of our own",
+          _okj, _msgj)
+finally:
+    xf._CTX, xf.ACTIVE_SUBSET_FINGERPRINT, xf.FAITH_SUBSET_IDX = _ctx0_33, _fp0_33, _idx0_33
+    xs.ACTIVE_SUBSET_SNAPSHOT, xs.VALIDATION_ROW_IDS = _snap0_33, _vids0_33
+
+_srcK = "".join(_inspect28.getsource(f) for f in (_xlog.decompose_study, _xlog.gamma_curve))
+check("K. the other two producers go through the same door: no aggregate anywhere is guarded "
+      "without being stamped, which is what keeps the two from drifting apart",
+      _srcK.count("stamp_aggregate") == 2 and "assert_same_population" not in _srcK,
+      f"{_srcK.count('stamp_aggregate')} call sites over decompose_study and gamma_curve")
 
 # ======================================================================= 34 ===
 section("34. GATE DIAGNOSTICS — the population is the validation set, not its first batch")
@@ -1940,6 +1935,59 @@ check("D. the reversed order fails the same check, so it is the ORDER being meas
       _bad35.index("KERAS_BACKEND") > _tf_bad,
       "assignment after the import is what the check catches")
 
+# Cases A and B read the FILE. Neither can see the two halves of one gap: a pin that does not
+# match what is on the machine (`tensorflow-metadata` declared 1.16.1, installed 1.21.0, which
+# is what made `@@ENV@@` walk the whole TFDS tree before raising), and a dependency reached by
+# NAME and never imported. Both are answered by the installed metadata, not by the source.
+from importlib.metadata import PackageNotFoundError as _PNF35   # noqa: E402
+from importlib.metadata import version as _ver35                # noqa: E402
+
+
+def pins35(text):
+    """{distribution: version} for the `==` lines alone -- a range is a deliberate choice."""
+    out = {}
+    for l in text.splitlines():
+        l = l.split("#")[0].split(";")[0].strip()       # markers are dropped, not evaluated:
+        if "==" in l:                                   # the two platform lines pin one version
+            name, ver = l.split("==", 1)
+            out[name.split("[")[0].strip().lower()] = ver.strip()
+    return out
+
+
+def installed35(dist):
+    try:
+        return _ver35(dist)
+    except _PNF35:
+        return None
+
+
+_pins35 = pins35(_req35)
+_drift35 = {d: (w, installed35(d)) for d, w in _pins35.items() if installed35(d) != w}
+check("E. every pinned requirement is the version actually INSTALLED — a declaration the "
+      "machine does not match describes an environment nobody has",
+      not _drift35,
+      "; ".join(f"{d}: declared {w}, installed {g}" for d, (w, g) in _drift35.items())
+      or f"{len(_pins35)} pinned, all matching")
+
+# Reached by NAME and never imported: nobody writes `import pyarrow`, it is pandas' parquet
+# engine, resolved from a string -- so the import walk of case A is blind to it by construction,
+# while every frame the pipeline freezes or reads goes through it.
+_BY_NAME35 = ("pyarrow",)
+_byname35 = [d for d in _BY_NAME35
+             if installed35(d) is None or d.lower() not in _declared35]
+check("F. the dependencies reached by name are declared and installed all the same — an import "
+      "walk cannot reach them, so they are named here",
+      not _byname35,
+      f"missing: {_byname35}" if _byname35 else f"{len(_BY_NAME35)}: {', '.join(_BY_NAME35)}")
+
+_probe35 = pins35("guard-probe-not-a-package==0.0.1\nnumpy>=2.0,<2.1\n")
+check("G. it is the COMPARISON being measured: a range stays out of the pinned set, and a pin "
+      "nothing satisfies is caught — otherwise E and F would pass over a broken check too",
+      list(_probe35) == ["guard-probe-not-a-package"]
+      and installed35("guard-probe-not-a-package") != "0.0.1",
+      f"pinned set from a mixed file: {list(_probe35)}")
+
+
 # ======================================================================= 36 ===
 section("36. FEATURE PROVENANCE — the engineered columns against the code that creates them")
 # The premise the study rests on: switching off the tabular branch does not remove the image's
@@ -2084,6 +2132,76 @@ else:
               _added36 == set(_rootsL36),
               f"added {len(_added36)}, named {len(_rootsL36)}, unnamed "
               f"{sorted(_added36 - set(_rootsL36)) or 'none'}")
+
+
+# ======================================================================= 37 ===
+section("37. RULE ZERO — the repository speaks English, printed messages included")
+# The audit is the single file written in Italian, by decision. Everything else that stays in
+# the repository is English: comments, docstrings, raised messages, notebook markdown. The tree
+# was walked once, on 16/08, and held 195 Italian lines across nine modules; this is here so
+# the next one is caught by the suite instead of by reading.
+import glob as _glob37                                                  # noqa: E402
+import json as _js37                                                    # noqa: E402
+import re as _re37                                                      # noqa: E402
+
+# Words that cannot occur in English prose or inside an identifier. Four short ones are left
+# out on purpose: they live inside `None`, `non-trainable`, `come out` and `Cordei`, which is
+# how a language check turns into noise nobody trusts. The boundaries are `\w` only and never
+# the apostrophe, or every elided and truncated form would walk straight through.
+_WORDS37 = ("che", "della", "delle", "degli", "dei", "viene", "vengono", "senza", "perche",  # noqa: lang
+            "perché", "quindi", "nessun", "nessuna", "nessuno", "invece", "gia", "già",      # noqa: lang
+            "piu", "più", "cioe", "cioè", "questo", "questa", "sulla", "nella", "nello",     # noqa: lang
+            "ogni", "qui", "fedelta", "qualita", "identita", "vicinato", "campione",         # noqa: lang
+            "impronta")                                                                      # noqa: lang
+_RE37 = _re37.compile(r"(?<!\w)(" + "|".join(_WORDS37) + r")(?!\w)", _re37.I)
+
+# The vocabulary above is Italian by necessity, and it sits inside the population case A walks.
+# It carries a marker rather than being excused by line number, so the section can be moved or
+# extended without opening a hole behind it.
+_SKIP37 = "noqa: lang"
+
+
+def italian37(text):
+    return [l.strip()[:72] for l in text.splitlines()
+            if _SKIP37 not in l and _RE37.search(l)]
+
+
+_NBS37 = ["notebooks/modality_attendance/isic24_modality_attendance_train_canon.ipynb",
+          "notebooks/modality_attendance/isic24_modality_attendance_posthoc canon.ipynb",
+          "notebooks/data_preproc/isic24_create_dataset.ipynb"]
+
+_bad37 = {}
+for _pat37 in ("src/isic24/**/*.py", "scripts/**/*.py"):
+    for _f in sorted(_glob37.glob(os.path.join(BASE, _pat37), recursive=True)):
+        if (_hits := italian37(open(_f, encoding="utf-8").read())):
+            _bad37[os.path.relpath(_f, BASE)] = _hits
+for _p in _NBS37:
+    _nb37 = _js37.load(open(os.path.join(BASE, _p), encoding="utf-8"))
+    if (_hits := italian37("\n".join("".join(c["source"]) for c in _nb37["cells"]))):
+        _bad37[_p] = _hits
+
+check("A. no module, no script and no canonical notebook carries Italian — comments, "
+      "docstrings and raised messages alike, this suite included",
+      not _bad37,
+      "; ".join(f"{k}: {v[0]}" for k, v in list(_bad37.items())[:3]) or
+      f"{len(_NBS37)} notebooks and every .py under src/ and scripts/")
+
+check("B. and it is the LANGUAGE being measured, not an empty walk: a line of the prose "
+      "deleted on 16/08 is caught",
+      italian37("# Il collage cresce come il batch: sarebbe un PNG che nessuno guarda"),  # noqa: lang
+      "the sentence that opened the Grad-CAM collage comment")
+
+check("C. English that reads Italian to a careless matcher stays clean — `None`, "
+      "`non-trainable`, `come out` and a truncated token buried in an English word are not "
+      "the check firing",
+      not italian37("x = None  # non-trainable weights come out of the solo branch, "
+                    "named after Cordei and codeine"),
+      "no false positive on the shapes that made a naive word list unusable")
+
+check("D. the marker is what lets the vocabulary itself live inside the population A walks: "
+      "without it, that same line is Italian and is caught",
+      italian37("_WORDS37 = ('che', 'della', 'senza')"),                       # noqa: lang
+      "the exemption is one marked line, not a rule about where the section sits")
 
 
 # =============================================================================

@@ -231,15 +231,15 @@ def plot_shap_scatter_top4_numeric(
 # --------------------------------------------------------------------------------------
 
 def aggregate_raw_importance(encoded_feature_names, mean_abs_vec):
-    """Somma le dimensioni encoded sulla feature RAW da cui vengono.
+    """Sum the encoded dimensions onto the RAW feature they come from.
 
-    La mappatura sta in `xai_metrics.raw_name_for`, un posto solo. Qui c'era
-    `name.startswith("age_approx_bin_")` scritto a mano: su ISIC24 e' equivalente (l'unica
-    feature discretizzata e' `age_approx`), ma il notebook costruisce i nomi con
-    `f"{name}_bin_{b}"` per OGNI `Discretization`. Su un dataset con una seconda feature
-    discretizzata questa funzione avrebbe mappato `foo_bin_0` sul raw `"foo_bin_0"` invece
-    che su `"foo"` — in silenzio, e in disaccordo con `encoded_indices_for_raw` qui sopra,
-    che il `_bin_` lo gestisce generico. Trovato il 2026-08-01.
+    The mapping lives in `xai_metrics.raw_name_for`, in one place. There used to be a
+    hand-written `name.startswith("age_approx_bin_")` here: on ISIC24 it is equivalent (the
+    only discretized feature is `age_approx`), but the notebook builds the names with
+    `f"{name}_bin_{b}"` for EVERY `Discretization`. On a dataset with a second discretized
+    feature this function would have mapped `foo_bin_0` onto the raw `"foo_bin_0"` instead of
+    onto `"foo"` — silently, and disagreeing with `encoded_indices_for_raw` above, which
+    handles `_bin_` generically. Found on 2026-08-01.
     """
     from .xai_metrics import raw_name_for
     agg = {}
@@ -458,9 +458,9 @@ class ShapCallback(Callback):
         max_samples: int = 512,   # total samples in explanation set
         max_batches: int | None = None,  # limit num batches to read, or None
         rng_seed: int = 0,
-        subset_idx=None,           # indici POSIZIONALI in validation_df; None = prefisso
-        subset_fingerprint=None,   # stampigliato nell'npz: senza, i file non sono
-                                   # riutilizzabili sotto un campione diverso (guard in
+        subset_idx=None,           # POSITIONAL indices in validation_df; None = prefix
+        subset_fingerprint=None,   # stamped into the npz: without it the files are not
+                                   # reusable under a different sample (guard in
                                    # xai_faithfulness._load_shap_values)
     ):
         super().__init__()
@@ -597,8 +597,8 @@ class ShapCallback(Callback):
         epoch_dir.mkdir(parents=True, exist_ok=True)
 
         from . import xai_subset as xs
-        # Le righe di validation spiegate, e la loro identita': `explained_indices` sono
-        # posizioni DENTRO il campione, quindi da sole non dicono quali lesioni siano.
+        # The explained validation rows and their identity: `explained_indices` are positions
+        # INSIDE the sample, so on their own they do not say which lesions those are.
         vi = (None if self.subset_idx is None
               else np.asarray(self.subset_idx, int)[
                   np.asarray(stats["explained_indices"], int)])
@@ -612,19 +612,19 @@ class ShapCallback(Callback):
             mean_abs_all=mean_abs_all,
             mean_abs_pos=mean_abs_pos,
             mean_abs_neg=mean_abs_neg,
-            # L'impronta del campione: `explained_indices` sono POSIZIONI, quindi senza
-            # questa un npz non e' distinguibile da uno prodotto su altre righe.
+            # The sample fingerprint: `explained_indices` are POSITIONS, so without it an npz
+            # cannot be told from one produced on other rows.
             **({} if self.subset_fingerprint is None
                else {"subset_fingerprint": str(self.subset_fingerprint)}),
-            # La POSIZIONE IN `validation_df` di ogni campione spiegato, e il suo id di riga
-            # — le stesse due chiavi, con lo stesso significato, che scrivono Grad-CAM
-            # (`gradcam_arrays_*.npz`), LORE (per-sample CSV) e la fedelta'.
+            # The POSITION IN `validation_df` of every explained sample, and its row id — the
+            # same two keys, with the same meaning, that Grad-CAM (`gradcam_arrays_*.npz`),
+            # LORE (per-sample CSV) and faithfulness write.
             #
-            # Servono perche' `explained_indices` NON e' quella cosa: sono posizioni DENTRO
-            # il campione (0..n-1), quindi due motori sullo stesso campione producono indici
-            # che si somigliano e non sono confrontabili. E' esattamente il modo in cui
-            # l'accordo SHAP<->LORE usciva NaN. E la posizione da sola non sopravvive a una
-            # ricostruzione del fold: l'identita' si', ed e' `row_id`.
+            # They are needed because `explained_indices` is NOT that thing: those are positions
+            # INSIDE the sample (0..n-1), so two engines on the same sample produce indices that
+            # look alike and are not comparable. That is exactly how the SHAP<->LORE agreement
+            # came out NaN. And a position alone does not survive a rebuild of the fold: the
+            # identity does, and it is `row_id`.
             **({} if vi is None else {"val_index": vi, **xs.stamp_row_ids(vi)}),
         )
 
@@ -637,11 +637,11 @@ class ShapCallback(Callback):
         top1_share = float(mean_abs_all.max() / (total_abs + 1e-12))
         top5_share = float(np.sort(mean_abs_all)[::-1][:5].sum() / (total_abs + 1e-12))
 
-        # Metriche di FORMA (leggibilita'): compattezza per entropia e k90 sparsity, dalle
-        # stesse attribuzioni che sono gia' in memoria. Escono qui, con tutto il resto,
-        # invece che da una cella da lanciare dopo. Sono un COMPLEMENTO: `shap_mass` accanto
-        # dice se c'e' qualcosa da spiegare — con il ramo tabellare spento la compattezza
-        # sarebbe 1.000 (il massimo) e `xai_metrics` la mette a NaN apposta.
+        # SHAPE metrics (readability): entropy compactness and k90 sparsity, from the same
+        # attributions already in memory. They come out here, with everything else, rather than
+        # from a cell to launch afterwards. They are a COMPLEMENT: `shap_mass` beside them says
+        # whether there is anything to explain — with the tabular branch off, compactness would
+        # be 1.000 (the maximum) and `xai_metrics` sets it to NaN on purpose.
         from .xai_metrics import shap_shape_from_values
         shape = shap_shape_from_values(shap_vals, stats["explained_indices"])
 
@@ -779,20 +779,20 @@ class MultiModalGradCAMEngine:
         # --- CAMs (B, Hc, Wc) ---
         cams = self._generate_cams(conv_out, grads)  # list of (Hc, Wc)
         cams = np.stack(cams, axis=0)
-        # Le heatmap GREZZE, esposte perche' il callback possa SALVARLE. Fino al 01/08 questa
-        # funzione restituiva solo il collage RGB: le uniche tracce del lato immagine erano
-        # 106 PNG con la colormap gia' applicata, e da li' non si ricava nessuna metrica
-        # (entropia, area attivata, componenti connesse, IoU fra configurazioni). Non e' nel
-        # valore di ritorno per non rompere i chiamanti che spacchettano tre elementi.
+        # The RAW heatmaps, exposed so the callback can SAVE them. Until 01/08 this function
+        # returned the RGB collage alone: the only traces of the image side were 106 PNGs with
+        # the colormap already applied, and no metric can be recovered from those (entropy,
+        # activated area, connected components, IoU between configurations). It is not in the
+        # return value so as not to break callers that unpack three elements.
         self.last_cams = cams
         self.last_preds = preds.numpy() if isinstance(preds, tf.Tensor) else preds
 
         # --- Triptychs with display images ---
         triptychs = []
         preds_np = self.last_preds
-        # Il collage cresce come il batch: a n=144 sarebbe un PNG enorme che nessuno guarda,
-        # e comporlo costa piu' del Grad-CAM stesso. Oltre `max_grid` si salvano solo gli
-        # array, che sono il pezzo che serve.
+        # The collage grows with the batch: at n=144 it would be an enormous PNG nobody looks
+        # at, and composing it costs more than Grad-CAM itself. Beyond `max_grid` only the
+        # arrays are saved, which are the piece that matters.
         n_vis = min(images.shape[0], int(getattr(self, "max_grid", 8)))
         for i in range(n_vis):
             pred_text = self._format_pred_text(preds_np[i])
@@ -1015,25 +1015,25 @@ class MultiModalGradCAMCallback(Callback):
         self.class_index = class_index
         self.layer_name = layer_name
         self.tag = tag
-        # DUE MODI, uno stesso caricamento. `image_only` azzera le feature tabellari e
-        # chiede "dove guarderebbe SENZA il tabellare"; `context` usa le feature vere e
-        # chiede "dove guarda davvero". Per uno studio sull'attendance servono entrambi, e
-        # la loro DIFFERENZA (IoU fra le due maschere) e' essa stessa un segnale: quanto il
-        # ramo tabellare sposta l'attenzione visiva.
+        # TWO MODES, one same loading. `image_only` zeroes the tabular features and asks
+        # "where would it look WITHOUT the tabular branch"; `context` uses the real features and
+        # asks "where does it actually look". An attendance study needs both, and their
+        # DIFFERENCE (IoU between the two masks) is itself a signal: how much the tabular branch
+        # moves visual attention.
         #
-        # Costano poco insieme perche' il caro e' altrove: caricare il checkpoint e leggere
-        # il dataset fino alle 144 lesioni si paga UNA volta per run, il passo di gradiente
-        # e' l'unica cosa che raddoppia.
+        # They cost little together because the expense is elsewhere: loading the checkpoint and
+        # reading the dataset up to the 144 lesions is paid ONCE per run, and the gradient step
+        # is the only thing that doubles.
         #
-        # `modes=None` = comportamento storico: un modo solo, quello del motore.
+        # `modes=None` = the historical behaviour: one mode only, the engine's own.
         self.modes = tuple(modes) if modes else (engine.mode,)
-        # Le POSIZIONI in validation_df delle immagini nel probe batch, e l'impronta del
-        # campione. Servono a rendere le heatmap riallineabili con SHAP e LORE: fino al
-        # 01/08 Grad-CAM girava sulle prime 8 righe e non lasciava traccia di quali fossero.
+        # The POSITIONS in validation_df of the images in the probe batch, and the sample
+        # fingerprint. They make the heatmaps realignable with SHAP and LORE: until 01/08
+        # Grad-CAM ran on the first 8 rows and left no trace of which they were.
         self.subset_idx = subset_idx
         self.subset_fingerprint = subset_fingerprint
-        # Quante immagini per passo di gradiente. None = tutte insieme (comportamento
-        # storico, che a n=8 andava bene e a n=144 esaurisce la GPU).
+        # How many images per gradient step. None = all at once (the historical behaviour,
+        # fine at n=8 and out of GPU memory at n=144).
         self.batch_size = batch_size
         self.save_dir = Path(save_dir) if save_dir else None
         if self.save_dir:
@@ -1046,11 +1046,11 @@ class MultiModalGradCAMCallback(Callback):
 
         for mode in self.modes:
             self.engine.mode = mode
-            # A CHUNK, non tutto insieme. Con 144 immagini in un solo `GradientTape` e i
-            # guided gradients servono ~22 GiB solo di attivazioni (misurato 01/08:
-            # ResourceExhaustedError su un tensore (144, 8, 8, 1248) con 23.9 GiB di GPU).
-            # Grad-CAM e' per campione: non c'e' nessuna dipendenza fra immagini, quindi
-            # spezzare il batch da' lo STESSO risultato con memoria costante.
+            # IN CHUNKS, not all at once. With 144 images in a single `GradientTape` the guided
+            # gradients need some 22 GiB of activations alone (measured 01/08:
+            # ResourceExhaustedError on a (144, 8, 8, 1248) tensor with 23.9 GiB of GPU).
+            # Grad-CAM is per sample: there is no dependency between images, so splitting the
+            # batch gives the SAME result at constant memory.
             xb, yb = self.probe_batch
             n_tot = int(len(next(iter(xb.values()))))
             step = max(1, int(self.batch_size or n_tot))
@@ -1066,13 +1066,13 @@ class MultiModalGradCAMCallback(Callback):
                 cams_parts.append(np.asarray(self.engine.last_cams))
                 preds_parts.append(np.asarray(p))
                 if grid is None:
-                    grid = g          # il collage viene dal primo chunk: e' un'anteprima
+                    grid = g          # the collage comes from the first chunk: it is a preview
             self.engine.last_cams = np.concatenate(cams_parts, axis=0)
             preds = np.concatenate(preds_parts, axis=0)
             if not self.save_dir:
                 continue
-            # Nome storico con un modo solo (`epoch_003.png`), suffissato con due: le run
-            # canoniche restano leggibili dagli script che le cercano per quel nome.
+            # The historical name under a single mode (`epoch_003.png`), suffixed under two:
+            # the canonical runs stay readable by whatever looks for them under that name.
             sfx = "" if single else f"_{mode}"
             out = (np.clip(grid, 0, 1) * 255).astype(np.uint8)
             cv2.imwrite(str(self.save_dir / f"epoch_{epoch:03d}{sfx}.png"),
@@ -1084,10 +1084,10 @@ class MultiModalGradCAMCallback(Callback):
             by_mode[mode] = np.asarray(cams, np.float32)
             preds_by_mode[mode] = np.asarray(preds, np.float32).reshape(len(cams), -1)
 
-            # LE HEATMAP GREZZE: precondizione di ogni metrica sul lato immagine. Da un PNG
-            # con la colormap applicata non si ricava ne' entropia ne' area ne' IoU.
-            # `val_index` e `row_id` le accompagnano per lo stesso motivo per cui
-            # accompagnano le regole LORE: senza, non si sa QUALI lesioni sono spiegate.
+            # THE RAW HEATMAPS: the precondition of every image-side metric. From a PNG with
+            # the colormap applied neither entropy nor area nor IoU can be recovered.
+            # `val_index` and `row_id` come with them for the same reason they come with the LORE
+            # rules: without them, WHICH lesions are explained is unknown.
             from . import xai_subset as xs
             vi = (None if self.subset_idx is None
                   else np.asarray(self.subset_idx, int)[:len(cams)])
@@ -1098,27 +1098,27 @@ class MultiModalGradCAMCallback(Callback):
                 **({} if self.subset_fingerprint is None
                    else {"subset_fingerprint": str(self.subset_fingerprint)}))
 
-            # Le metriche vanno nella TABELLA e basta. La figura per-run che c'era qui
-            # (heatmap media, frazione sopra soglia, bar chart delle metriche) e' stata
-            # tolta il 01/08: le prime due non dicono niente e la terza duplica in
-            # pixel una riga di CSV. Su 110 run x 2 modi erano 220 PNG di ingombro.
+            # The metrics go into the TABLE and nowhere else. The per-run figure that used to
+            # be here (mean heatmap, fraction above threshold, bar chart of the metrics) was
+            # removed on 01/08: the first two say nothing and the third duplicates a CSV row in
+            # pixels. Over 110 runs x 2 modes that was 220 PNGs of clutter.
             shape = gradcam_shape_from_cams(by_mode[mode])
             append_epoch_row(self.save_dir / "gradcam_summary.csv",
                              {"epoch_mode": f"{epoch:03d}:{mode}", "epoch": int(epoch),
                               "mode": mode, "n_cams": int(len(cams)), **shape},
-                             key="epoch_mode")   # <- due righe per epoca: la chiave e' la coppia
+                             key="epoch_mode")   # <- two rows per epoch: the key is the pair
 
-        # Il segnale che nasce dall'avere ENTRAMBI: quanto il ramo tabellare sposta
-        # l'attenzione visiva. IoU 1.0 = il tabellare non cambia dove il modello guarda.
+        # The signal that comes from having BOTH: how much the tabular branch moves visual
+        # attention. IoU 1.0 = the tabular branch does not change where the model looks.
         #
-        # ⚠️ LA IoU DA SOLA NON BASTA, ed e' il motivo per cui questa riga usciva quasi
-        # vuota. Su cinque famiglie su sei la testa e' `Dense(1)` su una `Concatenate`,
-        # quindi il logit e' ADDITIVO nei due rami e d(logit)/d(conv_out) non dipende
-        # affatto dalle feature: la heatmap e' identica per costruzione, non per risultato,
-        # e la IoU vale 1.000 ovunque. Intanto la PREDIZIONE cambia fino a 0.53 — cioe' la
-        # riga di confronto diceva «non e' successo niente» proprio mentre l'unica cosa che
-        # si muoveva non era registrata da nessuna parte. Ora la riga porta anche la
-        # differenza sulle heatmap grezze e quella sulle predizioni.
+        # THE IoU ALONE IS NOT ENOUGH, and that is why this row used to come out almost empty.
+        # On five families out of six the head is `Dense(1)` over a `Concatenate`, so the logit
+        # is ADDITIVE in the two branches and d(logit)/d(conv_out) does not depend on the
+        # features at all: the heatmap is identical by construction, not as a result, and the
+        # IoU is 1.000 everywhere. Meanwhile the PREDICTION moves by up to 0.53 — that is, the
+        # comparison row said "nothing happened" exactly while the only thing that moved was
+        # recorded nowhere. The row now carries the difference on the raw heatmaps and the one
+        # on the predictions.
         if self.save_dir and {"image_only", "context"} <= set(by_mode):
             contrast = cam_mode_contrast(by_mode["context"], by_mode["image_only"],
                                          preds_by_mode.get("context"),

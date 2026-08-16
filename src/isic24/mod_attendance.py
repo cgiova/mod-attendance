@@ -185,9 +185,9 @@ def weighted_loss_ps(y_true, y_pred):
     # BCE base
     base_loss = keras.losses.binary_crossentropy(y_true, y_pred, label_smoothing=0.02)
 
-    # Penalità sui pesi che connettono la parte tabellare all’output
-    W = dense_final.kernel  # matrice [dim_img + dim_tab, 1]
-    W_tab = W[dim_img:]     # seleziona solo la parte tabellare
+    # Penalty on the weights connecting the tabular part to the output
+    W = dense_final.kernel  # matrix [dim_img + dim_tab, 1]
+    W_tab = W[dim_img:]     # the tabular part only
     reg_term = lambda_reg * tf.reduce_sum(tf.square(W_tab))
 
     return base_loss + reg_term

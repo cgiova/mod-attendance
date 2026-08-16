@@ -150,34 +150,34 @@ CANONICAL_WRITE_GUARD = True
 
 # Everything each engine's callback writes under `run_dir/xai/`, per engine.
 def shap_subdir():
-    """`shap` o `shap_tab`, secondo che un campione XAI sia adottato o no.
+    """`shap` or `shap_tab`, according to whether an XAI sample is adopted.
 
-    UN SOLO posto decide dove vive SHAP, perche' tre pezzi devono essere d'accordo: chi
-    scrive (`make_xai_callbacks`), chi protegge (`_CLOBBERABLE`) e chi rilegge
-    (`xai_faithfulness._load_shap_values`). Se divergono, il guard difende una cartella
-    vuota mentre il lettore ne trova un'altra — e gli npz canonici di giugno, che sono sul
-    PREFISSO e senza stampigliatura, tornano a essere gli unici che si trovano.
+    ONE place decides where SHAP lives, because three pieces have to agree: the writer
+    (`make_xai_callbacks`), the protector (`_CLOBBERABLE`) and the reader
+    (`xai_faithfulness._load_shap_values`). Should they diverge, the guard defends an empty
+    folder while the reader finds another one — and June's canonical npz, which are on the
+    PREFIX and unstamped, go back to being the only ones found.
 
-    `xai/shap/`      artefatti canonici, prefisso, mai riscritti
-    `xai/shap_tab/`  tutto cio' che e' calcolato sul campione adottato: array SHAP +
-                     fedelta' con segno. Una cartella, un campione.
+    `xai/shap/`      canonical artifacts, prefix, never rewritten
+    `xai/shap_tab/`  everything computed on the adopted sample: SHAP arrays + signed
+                     faithfulness. One folder, one sample.
     """
     return "shap_tab" if SHAP_KWARGS.get("subset_fingerprint") else "shap"
 
 
 def gradcam_subdir():
-    """`gradcam` o `gradcam_img`, secondo che un campione XAI sia adottato o no.
+    """`gradcam` or `gradcam_img`, according to whether an XAI sample is adopted.
 
-    Stessa logica di `shap_subdir`. `xai/gradcam/` tiene i 106 PNG storici: OTTO immagini
-    prese dalla testa di `validation_ds`, senza array e senza traccia di quali fossero.
-    `xai/gradcam_img/` e' il lato immagine rifatto sul campione a lesioni distinte, con le
-    heatmap GREZZE salvate — che sono la precondizione di qualunque metrica sull'immagine.
+    Same logic as `shap_subdir`. `xai/gradcam/` holds the 106 historical PNGs: EIGHT images
+    taken off the head of `validation_ds`, with no arrays and no trace of which they were.
+    `xai/gradcam_img/` is the image side redone on the distinct-lesion sample, with the RAW
+    heatmaps saved — which are the precondition of any metric on the image.
     """
     return "gradcam_img" if SHAP_KWARGS.get("subset_fingerprint") else "gradcam"
 
 
 _CLOBBERABLE = {
-    # dipende dal campione adottato, come `lore` dipende dal motore: vedi `_patterns_for`
+    # depends on the adopted sample, as `lore` depends on the engine: see `_patterns_for`
     "shap": {"shap":     ("xai/shap/epoch_*", "xai/shap/*.csv"),
              "shap_tab": ("xai/shap_tab/epoch_*", "xai/shap_tab/shap_summary.csv")},
     "gradcam": {"gradcam":     ("xai/gradcam/epoch_*",),
@@ -197,21 +197,21 @@ _CLOBBERABLE = {
 def _patterns_for(engine):
     pats = _CLOBBERABLE.get(engine, ())
     if isinstance(pats, dict):
-        if engine == "shap":            # dipendono dal campione adottato
+        if engine == "shap":            # they depend on the adopted sample
             return pats.get(shap_subdir(), ())
         return pats.get(gradcam_subdir(), ())
     return pats
 
 
 def _is_artifact(path):
-    """Una directory VUOTA non e' un artefatto.
+    """An EMPTY directory is not an artifact.
 
-    I callback creano `epoch<NNN>/<engine>/` prima di calcolare, quindi un run
-    interrotto (Ctrl-C, OOM, kernel morto) lascia una cartella vuota. Contandola come
-    artefatto il write guard bloccava per sempre la ri-esecuzione di una run che non
-    aveva prodotto nulla, e l'unica uscita sarebbe stata `allow_clobber=True` -- cioe'
-    disarmare la protezione proprio dove serve. Trovato il 2026-07-30 su
-    `fixed_scaling/a1p000`, bloccata da una `tabular_sa/` vuota di 30 secondi prima.
+    The callbacks create `epoch<NNN>/<engine>/` before computing, so an interrupted run
+    (Ctrl-C, OOM, dead kernel) leaves an empty folder. Counting it as an artifact, the write
+    guard blocked forever the re-execution of a run that had produced nothing, and the only
+    way out would have been `allow_clobber=True` -- that is, disarming the protection exactly
+    where it is needed. Found on 2026-07-30 on `fixed_scaling/a1p000`, blocked by a
+    `tabular_sa/` emptied 30 seconds earlier.
     """
     return bool(os.listdir(path)) if os.path.isdir(path) else True
 
@@ -256,13 +256,13 @@ def assert_writable(run_dir, engines=ALL_ENGINES, allow_clobber=False):
 # --------------------------------------------------------------------------------------
 
 def make_probe_batch(n=8, subset_idx=None):
-    """Le immagini di validation su cui gira Grad-CAM.
+    """The validation images Grad-CAM runs on.
 
-    ``subset_idx`` -- posizioni in ``validation_df``: e' cosi' che Grad-CAM spiega le STESSE
-    lesioni di SHAP e LORE.  Senza, si torna al comportamento storico: le prime ``n`` righe
-    di ``validation_ds`` (costruito con ``shuffle=False``), cioe' **otto** immagini del
-    prefisso.  Otto campioni non bastano per nessuna delle metriche sul lato immagine, ed e'
-    il motivo per cui il lato immagine e' stato rifatto il 2026-08-01.
+    ``subset_idx`` -- positions in ``validation_df``: this is how Grad-CAM explains the SAME
+    lesions as SHAP and LORE.  Without it, the historical behaviour returns: the first ``n``
+    rows of ``validation_ds`` (built with ``shuffle=False``), that is **eight** images of the
+    prefix.  Eight samples are not enough for any of the image-side metrics, and that is why
+    the image side was redone on 2026-08-01.
 
     Used to be a module-level global mutated on first use and cached across every run in
     the study; it is now an explicit argument so a caller can score a different model on
@@ -273,9 +273,9 @@ def make_probe_batch(n=8, subset_idx=None):
         xb, yb = next(iter(ctx.validation_ds))
         return {k: v[:n] for k, v in xb.items()}, yb[:n]
 
-    # Si legge il dataset fino alla posizione piu' alta richiesta e poi si indicizza: e' la
-    # stessa strategia di `LoreSACallback._freeze_batch`, e non assume che il campione sia
-    # un prefisso -- che e' esattamente l'assunzione che ci ha gia' ingannati due volte.
+    # Read the dataset up to the highest position asked for, then index: the same strategy as
+    # `LoreSACallback._freeze_batch`, and it does not assume the sample is a prefix -- which is
+    # exactly the assumption that has already deceived us twice.
     import numpy as _np
     import tensorflow as _tf
     idx = _np.asarray(subset_idx, int)
@@ -299,9 +299,9 @@ def make_xai_callbacks(run_dir, model_name, probe_batch=None, engines=ALL_ENGINE
                        xai_dir=None):
     """Build the SHAP / Grad-CAM / LORE callbacks for one run directory.
 
-    ``xai_dir`` reindirizza TUTTA la scrittura fuori da ``run_dir/xai``: e' cosi' che il
-    campione stratificato produce artefatti senza sfiorare le run canoniche (e senza
-    bisogno di ``allow_clobber``, che disarmerebbe il write guard proprio dove serve).
+    ``xai_dir`` redirects ALL writing away from ``run_dir/xai``: this is how the stratified
+    sample produces artifacts without touching the canonical runs (and without needing
+    ``allow_clobber``, which would disarm the write guard exactly where it is needed).
     """
     ctx = xf._CTX
     xai_dir = xai_dir or os.path.join(run_dir, "xai")
@@ -317,9 +317,9 @@ def make_xai_callbacks(run_dir, model_name, probe_batch=None, engines=ALL_ENGINE
     if "gradcam" in engines:
         d = os.path.join(xai_dir, gradcam_subdir())
         os.makedirs(d, exist_ok=True)
-        # Il probe batch segue il campione adottato: con `subset_idx` Grad-CAM spiega le
-        # STESSE lesioni di SHAP e LORE, e le heatmap diventano riallineabili con le altre
-        # due spiegazioni. Senza, resta il comportamento storico (le prime 8 righe).
+        # The probe batch follows the adopted sample: with `subset_idx` Grad-CAM explains the
+        # SAME lesions as SHAP and LORE, and the heatmaps become realignable with the other two
+        # explanations. Without it, the historical behaviour stands (the first 8 rows).
         _sub = SHAP_KWARGS.get("subset_idx")
         if probe_batch is None:
             probe_batch = make_probe_batch(subset_idx=_sub)
@@ -486,11 +486,11 @@ def load_run_model(run_dir, device=None):
     fixed_scaling / learnable_scaling / controlled_fusion / adaptive_gating checkpoints
     deserialize at all.
 
-    ``device`` (es. ``"/CPU:0"``) e' il device su cui le VARIABILI vengono create. E' la
-    differenza fra far girare un motore sulla CPU e non farlo: un `tf.device` attorno al
-    solo calcolo non sposta pesi gia' allocati sulla GPU, e la `predict` di Keras 3 (XLA)
-    muore invece di copiarli. Attorno al CARICAMENTO, invece, i pesi nascono dove si vuole
-    e da li' in poi tutto il grafo e' coerente. Vedi `LORE_SA_DEVICE`.
+    ``device`` (e.g. ``"/CPU:0"``) is the device the VARIABLES are created on. It is the
+    difference between running an engine on the CPU and not: a `tf.device` around the
+    computation alone does not move weights already allocated on the GPU, and Keras 3's
+    `predict` (XLA) dies instead of copying them. Around the LOADING, weights are born where
+    they are wanted and from there on the whole graph is coherent. See `LORE_SA_DEVICE`.
     """
     ck = sorted(glob.glob(os.path.join(run_dir, "checkpoints", "best_*.keras")))
     if not ck:
@@ -551,32 +551,32 @@ def run_posthoc_xai(run_dir, engines=ALL_ENGINES, best_epoch=None, best_val_auc=
         # Skip only if EVERY requested engine is recorded ok -- see `_status_key_for`.
         if all(prev.get(_status_key_for(e)) == "ok" for e in engines):
             if verbose:
-                print(f"[skip] {run_dir}: {list(engines)} gia' fatti (overwrite=False)")
+                print(f"[skip] {run_dir}: {list(engines)} already done (overwrite=False)")
             return prev
 
     if dry_run:
         if verbose:
             n = len(existing_xai_artifacts(run_dir, engines))
             blocked = "" if (allow_clobber or not n) else \
-                f" -- MA il write guard lo bloccherebbe: {n} artefatti XAI gia' presenti"
+                f" -- BUT the write guard would block it: {n} XAI artifacts already present"
             print(f"[dry-run] would run {engines} on {run_dir} @ epoch {best_epoch}{blocked}")
         return {e: "dry-run" for e in engines}
 
     if not external:
         assert_writable(run_dir, engines=engines, allow_clobber=allow_clobber)
 
-    # DOVE nascono i pesi. Con `LORE_SA_DEVICE="/CPU:0"` il checkpoint viene caricato con le
-    # variabili sulla CPU, e da li' in poi LORE gira tutto sulla CPU pur avendo la GPU
-    # visibile e libera per gli altri motori. Il `tf.device` attorno al solo `explain`
-    # (`xai_lore_sa`) non basta e non e' un'alternativa: e' l'errore del 02/08.
-    # Vale per LORE DA SOLO: caricare su CPU un modello per SHAP o Grad-CAM li renderebbe
-    # lentissimi in silenzio, quindi la combinazione e' un errore invece che una sorpresa.
+    # WHERE the weights are born. With `LORE_SA_DEVICE="/CPU:0"` the checkpoint is loaded with
+    # its variables on the CPU, and from there on LORE runs entirely on the CPU while the GPU
+    # stays visible and free for the other engines. A `tf.device` around `explain` alone
+    # (`xai_lore_sa`) is not enough and is not an alternative: that was the mistake of 02/08.
+    # It holds for LORE ALONE: loading a model on the CPU for SHAP or Grad-CAM would make them
+    # silently very slow, so the combination is an error rather than a surprise.
     _dev = LORE_SA_DEVICE if "lore" in engines else None
     if _dev and tuple(engines) != ("lore",):
         raise RuntimeError(
-            f"LORE_SA_DEVICE={LORE_SA_DEVICE!r} vale per il modello INTERO: con "
-            f"engines={tuple(engines)} ci finirebbero sopra anche gli altri motori.\n"
-            "  Lanciare LORE da solo (engines=('lore',)), oppure LORE_SA_DEVICE=None.")
+            f"LORE_SA_DEVICE={LORE_SA_DEVICE!r} holds for the WHOLE model: with "
+            f"engines={tuple(engines)} the other engines would land on it too.\n"
+            "  Run LORE on its own (engines=('lore',)), or LORE_SA_DEVICE=None.")
 
     model, cfg = load_run_model(run_dir, device=_dev)
     model_name = (model_cfg or cfg).get("model_name", os.path.basename(run_dir))

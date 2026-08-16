@@ -242,7 +242,7 @@ def rule_features(rule_text):
     intervals. That is the right semantics for a Jaccard between feature sets, which is what
     both sec. 2.4 and sec. 3.5 ask for.
     """
-    if not isinstance(rule_text, str) or "nessuna premessa" in rule_text:
+    if not isinstance(rule_text, str) or "<no premise>" in rule_text:
         return set()
     body = rule_text.split("THEN")[0].replace("IF", "", 1)
     out = set()
