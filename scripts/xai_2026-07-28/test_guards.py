@@ -45,7 +45,7 @@ def raises(fn, exc=RuntimeError):
     except exc as e:
         return True, str(e).splitlines()[0][:70]
     except Exception as e:                                   # noqa: BLE001
-        return False, f"eccezione INATTESA {type(e).__name__}: {e}"
+        return False, f"UNEXPECTED exception {type(e).__name__}: {e}"
 
 
 def section(t):
@@ -1326,18 +1326,18 @@ def _cell27(marker):
     return hits[0] if len(hits) == 1 else ""
 
 
-_c2, _c4 = _cell27("SUBSET@@ 2/4"), _cell27("SUBSET@@ 4/4")
-check("A. PH-15: the LORE subset has ONE definition — the two producers call xs.lore_subset, "
-      "neither builds an index of its own, and @@SHAPE@@ no longer guesses one",
-      _text27.count("xs.lore_subset(") == 2
-      and "xs.lore_subset(" in _c2 and "xs.lore_subset(" in _c4
-      and "np.linspace(" not in _c2 + _c4 and "LORE_IDX_BY_N" not in _text27,
-      f"{_text27.count('xs.lore_subset(')} call sites, no local construction")
+_c1, _c3 = _cell27("SUBSET@@ 1/3"), _cell27("SUBSET@@ 3/3")
+check("A. PH-15: the LORE subset has ONE definition and, since 16/08, ONE producer — "
+      "xs.lore_subset in @@SUBSET@@ 3/3, no cell building an index of its own, and "
+      "@@SHAPE@@ no longer guessing one",
+      _text27.count("xs.lore_subset(") == 1 and "xs.lore_subset(" in _c3
+      and "np.linspace(" not in _c1 + _c3 and "LORE_IDX_BY_N" not in _text27,
+      f"{_text27.count('xs.lore_subset(')} call site, no local construction")
 
-check("B. PH-05: a failed engine is never stamped as done — the result is inspected and the "
-      "run is skipped before mark_done",
-      '!= "ok"' in _c4 and _c4.find("[FAIL]") < _c4.find("xs.mark_done"),
-      "the failure path continues before the stamp")
+check("B. PH-05: a failed engine is never stamped as done — BOTH engine loops inspect the "
+      "result and skip the run before mark_done",
+      all('!= "ok"' in c and c.find("[FAIL]") < c.find("xs.mark_done") for c in (_c1, _c3)),
+      "the failure path continues before the stamp, in each loop")
 
 # ======================================================================= 28 ===
 section("28. LORE reference pool — the neighbourhood is drawn from the TRAINING rows")
@@ -2146,14 +2146,17 @@ import re as _re37                                                      # noqa: 
 
 # Words that cannot occur in English prose or inside an identifier. Four short ones are left
 # out on purpose: they live inside `None`, `non-trainable`, `come out` and `Cordei`, which is
-# how a language check turns into noise nobody trusts. The boundaries are `\w` only and never
-# the apostrophe, or every elided and truncated form would walk straight through.
-_WORDS37 = ("che", "della", "delle", "degli", "dei", "viene", "vengono", "senza", "perche",  # noqa: lang
-            "perché", "quindi", "nessun", "nessuna", "nessuno", "invece", "gia", "già",      # noqa: lang
-            "piu", "più", "cioe", "cioè", "questo", "questa", "sulla", "nella", "nello",     # noqa: lang
-            "ogni", "qui", "fedelta", "qualita", "identita", "vicinato", "campione",         # noqa: lang
-            "impronta")                                                                      # noqa: lang
-_RE37 = _re37.compile(r"(?<!\w)(" + "|".join(_WORDS37) + r")(?!\w)", _re37.I)
+# how a language check turns into noise nobody trusts. The boundaries are letters and digits
+# only: not the apostrophe, or every elided and truncated form would walk through, and not the
+# underscore, which is what `_nuovi` and `n_campioni` hid behind until 16/08.  # noqa: lang
+_WORDS37 = ("che", "della", "delle", "degli", "dei", "dal", "dalla", "viene", "vengono",     # noqa: lang
+            "senza", "perche", "perché", "quindi", "nessun", "nessuna", "nessuno",           # noqa: lang
+            "invece", "gia", "già", "piu", "più", "cioe", "cioè", "questo", "questa",        # noqa: lang
+            "sulla", "nella", "nello", "ogni", "qui", "dove", "dentro", "stanno", "hanno",   # noqa: lang
+            "scrive", "chiede", "lette", "alza", "esterna", "esterno", "nuovi", "nuovo",     # noqa: lang
+            "storici", "storico", "visti", "attributore", "fedelta", "qualita", "identita",  # noqa: lang
+            "vicinato", "campione", "campioni", "impronta")                                  # noqa: lang
+_RE37 = _re37.compile(r"(?<![A-Za-z0-9])(" + "|".join(_WORDS37) + r")(?![A-Za-z0-9])", _re37.I)
 
 # The vocabulary above is Italian by necessity, and it sits inside the population case A walks.
 # It carries a marker rather than being excused by line number, so the section can be moved or
@@ -2202,6 +2205,147 @@ check("D. the marker is what lets the vocabulary itself live inside the populati
       "without it, that same line is Italian and is caught",
       italian37("_WORDS37 = ('che', 'della', 'senza')"),                       # noqa: lang
       "the exemption is one marked line, not a rule about where the section sits")
+
+check("E. an underscore does not shield an identifier: `_nuovi` and `n_campioni` reached a "  # noqa: lang
+      "written CSV column because `\\w` counted `_` as part of the word",
+      italian37("_nuovi = sorted(glob.glob(p))") and                           # noqa: lang
+      italian37('fam = L.agg(n_campioni=("i", "size"))'),                      # noqa: lang
+      "the two spellings that walked past the first version of this check")
+
+check("F. and a word carrying the same trap in English does not fire: `palette` ends in a "
+      "vocabulary entry and `_del` is a prefixed English abbreviation",
+      not italian37("palette = _del_curves(z)  # deletion arm"),
+      "widening the vocabulary did not widen the false positives")
+
+
+# ======================================================================= 38 ===
+section("38. [NOTEBOOKS] — a canonical notebook is addressable and runs in its own order")
+# The two notebooks are the only executable entry points of the study, and they are the one
+# place the suite could not see: a name defined three cells below its use, a marker naming two
+# cells, a marker pointing at a cell that was deleted. All three were there on 16/08, and the
+# first cost a NameError 132 runs into the faithfulness loop.
+import ast as _ast38                                                    # noqa: E402
+import builtins as _bi38                                                # noqa: E402
+import json as _js38                                                    # noqa: E402
+import re as _re38                                                      # noqa: E402
+
+_NB38 = {"train": "notebooks/modality_attendance/isic24_modality_attendance_train_canon.ipynb",
+         "posthoc": "notebooks/modality_attendance/isic24_modality_attendance_posthoc canon.ipynb"}
+_BUILT38 = set(dir(_bi38)) | {"__name__", "__file__", "get_ipython", "display", "In", "Out"}
+# A marker is the name AND its part: `@@SUBSET@@ 2/3` and `@@SUBSET@@ 3/3` are two
+# addresses, and a bare `@@SUBSET@@` in a printed instruction is none.
+_MARK38 = _re38.compile(r"@@[A-Z0-9_]+@@(?:\s+\d+/\d+)?")
+
+
+def cells38(path):
+    nb = _js38.load(open(os.path.join(BASE, path), encoding="utf-8"))
+    return [("".join(c["source"]), c["cell_type"]) for c in nb["cells"]]
+
+
+def _bind38(tree):
+    out = set()
+    for n in _ast38.walk(tree):
+        if isinstance(n, (_ast38.FunctionDef, _ast38.AsyncFunctionDef, _ast38.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, _ast38.Name) and isinstance(n.ctx, _ast38.Store):
+            out.add(n.id)
+        elif isinstance(n, (_ast38.Import, _ast38.ImportFrom)):
+            out.update((a.asname or a.name).split(".")[0] for a in n.names)
+        elif isinstance(n, _ast38.arg):
+            out.add(n.arg)
+        elif isinstance(n, _ast38.ExceptHandler) and n.name:
+            out.add(n.name)
+        elif isinstance(n, (_ast38.Global, _ast38.Nonlocal)):
+            out.update(n.names)
+    return out
+
+
+def free38(cells):
+    """Names loaded before any cell binds them, walking the notebook in its own order."""
+    known, bad = set(), []
+    for i, (src, kind) in enumerate(cells):
+        if kind != "code":
+            continue
+        src = "\n".join(("#" + l if l.lstrip().startswith(("!", "%")) else l)
+                        for l in src.splitlines())
+        try:
+            tree = _ast38.parse(src)
+        except SyntaxError as e:
+            bad.append((i, f"SYNTAX: {e}"))
+            continue
+        b = _bind38(tree)
+        loads = {n.id for n in _ast38.walk(tree)
+                 if isinstance(n, _ast38.Name) and isinstance(n.ctx, _ast38.Load)}
+        bad += [(i, n) for n in sorted(loads - b - known - _BUILT38)]
+        known |= b
+    return bad
+
+
+def markers38(cells):
+    """marker -> how many cells it addresses. A cell's own marker is the FIRST on its header
+    line; the ones after it are references, which is how a header can point at another cell."""
+    out = {}
+    for src, _ in cells:
+        head = src.splitlines()[0] if src.splitlines() else ""
+        if (m := _MARK38.search(head)):
+            out[m.group(0)] = out.get(m.group(0), 0) + 1
+    return out
+
+
+_CELLS38 = {k: cells38(v) for k, v in _NB38.items()}
+_free38 = {k: free38(v) for k, v in _CELLS38.items()}
+
+check("A. no cell uses a name an earlier cell has not bound: the notebook runs in the order "
+      "it is written in",
+      not any(_free38.values()),
+      "; ".join(f"{k} cell {i}: {n}" for k, v in _free38.items() for i, n in v[:3])
+      or f"{sum(len(c) for c in _CELLS38.values())} cells over {len(_NB38)} notebooks")
+
+check("B. and the walk is really linear: a cell calling a helper the NEXT cell defines is "
+      "caught, which is the shape `assert_fs_matches_model` had",
+      free38([("y = assert_fs_matches_model(m)", "code"),
+              ("def assert_fs_matches_model(m): return 1", "code")]),
+      "definition-after-use, the class of defect nbcheck was written for")
+
+_dup38 = {k: {m: n for m, n in markers38(v).items() if n > 1} for k, v in _CELLS38.items()}
+check("C. no marker names two cells: a marker is the address of ONE cell, and PyCharm cannot "
+      "search an index",
+      not any(_dup38.values()),
+      "; ".join(f"{k}: {sorted(v)}" for k, v in _dup38.items() if v)
+      or f"{sum(len(markers38(v)) for v in _CELLS38.values())} distinct markers")
+
+_dangling38 = {}
+for _k, _cs in _CELLS38.items():
+    _have = set(markers38(_cs))
+    _named = {m for src, _ in _cs for m in _MARK38.findall(src)}
+    if _named - _have:
+        _dangling38[_k] = sorted(_named - _have)
+check("D. every marker a cell NAMES exists as a cell: a printed instruction that sends the "
+      "reader to a deleted cell is worse than no instruction",
+      not _dangling38, "; ".join(f"{k}: {v}" for k, v in _dangling38.items())
+      or "assert messages, run-order lists and cross-references all resolve")
+
+_src38 = {k: "\n".join(s for s, _ in v) for k, v in _CELLS38.items()}
+
+check("E. neither notebook re-declares CENTRAL_SETTINGS: it is study-level fact, it lives in "
+      "xai_subset, and a second copy is a second study nobody compares",
+      not _re38.search(r"CENTRAL_SETTINGS\s*=\s*\{", _src38["posthoc"] + _src38["train"]),
+      "the notebook binds the module's, it does not write the six tags again")
+
+check("F. no sweep starts a NEW study by default: with the canonical tags in place a re-run "
+      "prints RUN SKIP, and STUDY_TAG=None retrains the sweep beside the canonical one",
+      not _re38.search(r"STUDY_TAG\s*=\s*None", _src38["train"]),
+      "six sweeps, six tags on disk")
+
+_lore38 = [i for i, (src, _) in enumerate(_CELLS38["posthoc"]) if "LORE_SA_DEVICE" in src]
+check("G. exactly one post-hoc cell arms the LORE engine: two launchers over two populations "
+      "wrote the same xai/lore_sa/ and differed by 40 GPU hours",
+      len(_lore38) == 1, f"cells {_lore38}")
+
+check("H. the post-hoc reaches the aggregate door only through stamp_aggregate, never through "
+      "assert_same_population alone: a guarded table with no provenance beside it",
+      "assert_same_population" not in _src38["posthoc"],
+      "one door, both duties")
 
 
 # =============================================================================

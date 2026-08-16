@@ -290,7 +290,7 @@ def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
 
         found = [("canonical", "abs", canonical), ("aligned", "abs", aligned)]
         if include_signed:
-            # DOVE stanno le curve signed. Dal 01/08 le scrive `aligned_signed_faithfulness`
+            # WHERE the signed curves live. Since 01/08 `aligned_signed_faithfulness` writes them
             # inside the run (`xai/shap_tab/`), on the distinct-lesion sample: 110 runs x 4
             # modes = 440 files. The old root `_robustness/aligned_signed/` holds 24 of them,
             # from 6 runs on the PREFIX, picked for convenience — reading it means publishing
@@ -513,7 +513,6 @@ from tensorflow import keras
 import cv2
 
 # ---- Config (tweak to control cost) ---------------------------------
-FAITH_N_SAMPLES    = 128
 FAITH_BUDGETS      = (0.05, 0.10, 0.20, 0.40, 0.60)
 FAITH_METHODS      = ("tabular", "image", "joint")
 FAITH_DO_INSERTION = True          # set False if too heavy
@@ -545,20 +544,6 @@ def _build_tabular_baseline():
         else:
             base[col] = s.astype(str).mode().iloc[0]
     return base
-
-
-def faith_subsets(k=5, n=FAITH_N_SAMPLES, seed=0, n_val=None):
-    """`k` DISJOINT random subsets of `n` validation samples each.
-
-    Subset 0 is the canonical first-`n` (so its numbers must reproduce the published
-    faithfulness.json); subsets 1..k-1 are disjoint random draws from the rest. This is
-    what answers "would a DIFFERENT batch of 128 give the same answer?" -- the published
-    numbers rest on a single batch of 128 out of 1091 (11.7%)."""
-    n_val = n_val or len(_CTX.validation_df)
-    assert k * n <= n_val, f"{k} x {n} > {n_val} validation samples: subsets cannot be disjoint"
-    rest = np.setdiff1d(np.arange(n_val), np.arange(n))
-    rest = np.random.default_rng(seed).permutation(rest)
-    return [np.arange(n)] + [np.sort(rest[i * n:(i + 1) * n]) for i in range(k - 1)]
 
 
 # The sample ACTIVE in this session, set once by `xai_subset.adopt(...)`. Making it a default

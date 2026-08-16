@@ -551,8 +551,8 @@ class ShapCallback(Callback):
         if self.subset_idx is not None:
             if n_collected <= int(self.subset_idx.max()):
                 raise RuntimeError(
-                    f"il subset chiede la riga {int(self.subset_idx.max())} ma ne sono state "
-                    f"lette {n_collected}: alza max_samples/max_batches di ShapCallback.")
+                    f"the subset asks for row {int(self.subset_idx.max())} and only "
+                    f"{n_collected} were read: raise max_samples/max_batches on ShapCallback.")
             self._images = self._images[self.subset_idx]
             self._features = self._features[self.subset_idx]
             self._labels = self._labels[self.subset_idx]

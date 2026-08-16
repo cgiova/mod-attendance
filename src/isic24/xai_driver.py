@@ -542,8 +542,8 @@ def run_posthoc_xai(run_dir, engines=ALL_ENGINES, best_epoch=None, best_val_auc=
         best_epoch = model_cfg["best_epoch"] if best_epoch is None else best_epoch
         best_val_auc = model_cfg.get("best_val_auc", 0.0) if best_val_auc is None else best_val_auc
 
-    # Con `xai_dir` esterna non si scrive dentro run_dir: ne' lo status file ne' il write
-    # guard hanno giurisdizione, e la ripresa la fa il chiamante (isic24.xai_subset.is_done).
+    # An external `xai_dir` writes nothing inside run_dir: neither the status file nor the
+    # write guard has jurisdiction there, and resuming is the caller's job (`xai_subset.is_done`).
     external = xai_dir is not None
     status_path = os.path.join(xai_dir or os.path.join(run_dir, "xai"), "xai_status.json")
     if not overwrite and os.path.exists(status_path):

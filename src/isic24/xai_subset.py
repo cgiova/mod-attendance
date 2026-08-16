@@ -1138,7 +1138,7 @@ def sample_populations(run_dir, kinds=POPULATION_KINDS):
     The four engines write into four places and nothing forced them to agree, so a run can
     carry a Grad-CAM on one sample and a faithfulness curve on another. That is not
     hypothetical: the canonical faithfulness curves predate `adopt()` and sit on the first
-    `FAITH_N_SAMPLES` validation rows, which share 41 rows with the 144-lesion sample the
+    128 validation rows, which share 41 rows with the 144-lesion sample the
     other engines use. Nothing said so, because no artifact was ever read side by side.
 
     ``index`` is ``None`` for artifacts written before `val_index` existed: "unknown" is not
