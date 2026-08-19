@@ -734,34 +734,62 @@ check("F. a run_dir already inside the local tree passes through untouched",
       == "/local/art/runs/vanilla/r1")
 
 # ======================================================================= 16 ===
-section("16. image grid — one path only, and no nominal precision")
-# The engine used to trim the border (6x6) while faithfulness ranked patches on the full map
-# (8x8): 28 cells out of 64 differ, presented as the same map. And FAITH_IMG_GRID was fixed
-# at 16, that is 256 patches ranked from 64 numbers.
+section("16. image grid — one map, trimmed, and the patches it measures")
+# The backbone pads with `same` at five stride-2 stages, so the outer ring of the 8x8 grid is
+# partly computed from zeros. With the trim switched off, the bottom-right cell reached a median
+# 0.515 over the 132 canonical runs and won the argmax on 31% of the maps — and, being the
+# maximum, it normalized every other cell. Two Grad-CAM implementations made it worse: the
+# engine could trim while faithfulness ranked patches on the untrimmed map, the two presented
+# as the same heatmap.
 from isic24 import xai_engines as xe                            # noqa: E402
 
-check("A. the engine no longer trims the border by default", xe.TRIM_CAM_BORDER is False)
-check("B. FAITH_IMG_GRID follows the CAM instead of being fixed", xf.FAITH_IMG_GRID is None,
-      f"FAITH_IMG_GRID={xf.FAITH_IMG_GRID}")
+# A conv tensor whose border is the loudest thing in it: the artifact, in the shape it has.
+_B, _G, _C = 2, 8, 4
+_conv = np.full((_B, _G, _G, _C), 0.1, np.float32)
+_conv[:, 3:5, 3:5, :] = 1.0                                     # the signal, at the centre
+_conv[:, -1, :, :] = _conv[:, :, -1, :] = 9.0                   # the padded ring
+_grads = np.full_like(_conv, 0.5)
+_cam = xe.cams_from_conv(_conv, _grads)
 
-_cams = rng.random((3, 256, 256))
-for _g in (8, 16):
-    _o = xf._patch_saliency_order(_cams, _g)
-    check(f"C{_g}. the ranking on a {_g}x{_g} grid covers every patch once",
-          _o.shape == (3, _g * _g) and all(sorted(r.tolist()) == list(range(_g * _g)) for r in _o))
+check("A. the CAM drops one cell per side of the native grid",
+      _cam.shape == (_B, _G - 2 * xe.CAM_TRIM, _G - 2 * xe.CAM_TRIM), f"shape {_cam.shape}")
+check("B. the padded ring reaches neither the map nor the channel weights: the peak is the "
+      "centre, not the border", all(np.unravel_index(c.argmax(), c.shape) in
+                                    ((2, 2), (2, 3), (3, 2), (3, 3)) for c in _cam),
+      f"argmax {[np.unravel_index(c.argmax(), c.shape) for c in _cam]}")
 
-# The guard that refuses a grid finer than the CAM: exercised on the condition alone,
-# with no model, because the condition is the rule.
-def _grid_guard(grid, cam_grid):
-    if grid > cam_grid:
-        raise ValueError("[FAITH IMG GRID] nominal precision")
-    return grid
+# ONE implementation, called by both paths: the drift that produced two maps under one name
+# cannot come back by editing a copy, because there is no copy.
+check("C. the faithfulness path computes its maps through the engine's function",
+      "cams_from_conv(conv_out, tape.gradient(loss, conv_out))" in
+      _inspect28.getsource(xf._gradcam_maps))
 
+# Patch <-> pixel: cell (r, c) of the trimmed map perturbs exactly the pixels it measures.
+_side = _G * xe.CAM_STRIDE
+_img = np.zeros((1, _side, _side, 3), np.float32)
+_repl = np.ones_like(_img)
+_g6 = _G - 2 * xe.CAM_TRIM
+for _r, _c in ((0, 0), (2, 3), (_g6 - 1, _g6 - 1)):
+    _out = xf._perturb_image(_img, _repl, np.array([[_r * _g6 + _c]]), 1, _g6, deletion=True)
+    _y0, _x0 = xe.CAM_ORIGIN + _r * xe.CAM_STRIDE, xe.CAM_ORIGIN + _c * xe.CAM_STRIDE
+    _want = np.zeros_like(_img)
+    _want[0, _y0:_y0 + xe.CAM_STRIDE, _x0:_x0 + xe.CAM_STRIDE, :] = 1.0
+    check(f"D({_r},{_c}). the patch touches the pixels its cell measures",
+          np.array_equal(_out, _want))
 
-ok, msg = raises(lambda: _grid_guard(16, 8), ValueError)
-check("D. a grid finer than the CAM -> raises", ok, msg)
-ok_e, _ = raises(lambda: _grid_guard(8, 8), ValueError)
-check("E. a grid equal to the CAM -> passes", not ok_e)
+check("E. the patches cover the image minus the ring the trim leaves unmeasured — the "
+      "identity holds at any image_size, so the next dataset inherits it",
+      xe.CAM_ORIGIN + _g6 * xe.CAM_STRIDE == _side - xe.CAM_ORIGIN,
+      f"{xe.CAM_ORIGIN} + {_g6}x{xe.CAM_STRIDE} != {_side - xe.CAM_ORIGIN}")
+
+# The two arms must rank the SAME patches: pinning the unmeasured cells to the bottom of the
+# explained ranking alone would raise `faithfulness_gain` by construction.
+_src16 = _inspect28.getsource(xf.explanation_faithfulness)
+check("F. the explained arm ranks the CAM's own cells, no finer",
+      "np.argsort(-cams.reshape(len(cams), -1), axis=1)" in _src16 and
+      "n_patches = grid * grid" in _src16)
+check("G. the random arm draws from the same patch count",
+      "rng.random((n, n_patches))" in _src16)
 
 # ======================================================================= 15 ===
 section("15. TRAINING CONTRACT — the properties that live only in notebook cells")

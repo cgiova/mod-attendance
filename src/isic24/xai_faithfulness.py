@@ -26,7 +26,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from . import paths as _paths
-from .xai_engines import _finalize_plot, encoded_indices_for_raw
+from .xai_engines import (CAM_ORIGIN, CAM_STRIDE, _finalize_plot, cams_from_conv,
+                          encoded_indices_for_raw)
 
 
 # --------------------------------------------------------------------------------------
@@ -517,8 +518,6 @@ FAITH_BUDGETS      = (0.05, 0.10, 0.20, 0.40, 0.60)
 FAITH_METHODS      = ("tabular", "image", "joint")
 FAITH_DO_INSERTION = True          # set False if too heavy
 FAITH_N_RANDOM     = 3             # random-baseline repetitions
-FAITH_IMG_GRID     = None          # None = the native Grad-CAM grid; an int overrides it
-FAITH_CAM_STRIDE   = 32            # backbone total stride: the CAM is image_size / stride
 FAITH_IMG_REPLACE  = "blur"        # 'blur' | 'mean'
 FAITH_RNG_SEED     = 0
 FAITH_EVAL_BATCH   = 64
@@ -710,7 +709,7 @@ def _perturb_tabular_encoded(raw_df, order, k, deletion=True):
 
 
 def _gradcam_maps(model, imgs, enc_feats, batch=None):
-    """Per-sample Grad-CAM saliency upsampled to image size, in [0,1]."""
+    """Per-sample Grad-CAM saliency on the grid the CAM measures, in [0,1]."""
     batch = batch or FAITH_EVAL_BATCH
     conv = None
     for l in model.layers:
@@ -726,7 +725,6 @@ def _gradcam_maps(model, imgs, enc_feats, batch=None):
     grad_model = keras.Model(model.inputs, [conv, model.output])
     enc = tf.convert_to_tensor(enc_feats)
     maps = []
-    H, W = imgs.shape[1], imgs.shape[2]
     for i in range(0, len(imgs), batch):
         ib = tf.convert_to_tensor(imgs[i:i + batch])
         fb = enc[i:i + batch]
@@ -734,25 +732,9 @@ def _gradcam_maps(model, imgs, enc_feats, batch=None):
             conv_out, preds = grad_model({"images": ib, "features": fb}, training=False)
             p = tf.clip_by_value(preds[:, 0], 1e-6, 1.0 - 1e-6)
             loss = tf.reduce_sum(tf.math.log(p) - tf.math.log(1.0 - p))
-        grads = tape.gradient(loss, conv_out)
-        grads = tf.cast(conv_out > 0, grads.dtype) * tf.cast(grads > 0, grads.dtype) * grads
-        w = tf.reduce_mean(grads, axis=(1, 2))                       # (b, C)
-        cam = tf.nn.relu(tf.reduce_sum(conv_out * w[:, None, None, :], axis=-1))  # (b,Hc,Wc)
-        cam = cam.numpy()
-        native = cam.shape[1]
-        for j in range(cam.shape[0]):
-            c = cam[j] - cam[j].min()
-            mx = c.max()
-            c = c / mx if mx > 0 else c
-            maps.append(cv2.resize(c, (W, H)))
-    return np.stack(maps, 0), int(native)
-
-
-def _patch_saliency_order(cams, grid):
-    n, H, W = cams.shape
-    ph, pw = H // grid, W // grid
-    s = cams[:, :grid * ph, :grid * pw].reshape(n, grid, ph, grid, pw).mean(axis=(2, 4))
-    return np.argsort(-s.reshape(n, grid * grid), axis=1)           # desc, (n, grid*grid)
+        maps.append(cams_from_conv(conv_out, tape.gradient(loss, conv_out)))
+    cams = np.concatenate(maps, 0)
+    return cams, int(cams.shape[1])
 
 
 FAITH_BLUR_SIGMA = 8   # production value; Stage 3 sweeps this to test OOD sensitivity
@@ -770,15 +752,14 @@ def _image_replacement(imgs, sigma=None):
 
 
 def _perturb_image(imgs, repl, order, k, grid, deletion=True):
-    n, H, W, C = imgs.shape
-    ph, pw = H // grid, W // grid
     out = imgs.copy() if deletion else repl.copy()
     src = repl if deletion else imgs
-    for i in range(n):
+    for i in range(len(imgs)):
         for pidx in order[i, :k]:
             r, c = divmod(int(pidx), grid)
-            y0, x0 = r * ph, c * pw
-            out[i, y0:y0 + ph, x0:x0 + pw, :] = src[i, y0:y0 + ph, x0:x0 + pw, :]
+            y0, x0 = CAM_ORIGIN + r * CAM_STRIDE, CAM_ORIGIN + c * CAM_STRIDE
+            out[i, y0:y0 + CAM_STRIDE, x0:x0 + CAM_STRIDE, :] = \
+                src[i, y0:y0 + CAM_STRIDE, x0:x0 + CAM_STRIDE, :]
     return out
 
 
@@ -793,7 +774,7 @@ def _bootstrap_ci(vals, n_boot=2000, seed=0):
 
 
 def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
-                             methods=None, do_insertion=None, n_random=None, grid=None,
+                             methods=None, do_insertion=None, n_random=None,
                              rng_seed=None, save=True, verbose=True,
                              subset_idx=None, blur_sigma=None, tab_imp_override=None,
                              out_name="faithfulness", out_dir=None, allow_clobber=False):
@@ -819,7 +800,6 @@ def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
     methods = tuple(methods or FAITH_METHODS)
     do_insertion = FAITH_DO_INSERTION if do_insertion is None else do_insertion
     n_random = FAITH_N_RANDOM if n_random is None else n_random
-    grid = grid or FAITH_IMG_GRID          # None here: resolved from the CAM below
     rng = np.random.default_rng(FAITH_RNG_SEED if rng_seed is None else rng_seed)
     q_grid = np.array((0.0,) + budgets, dtype=np.float64)
 
@@ -849,18 +829,15 @@ def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
     s_orig = _score_logit(model, enc_orig, imgs)
     preds_orig = 1.0 / (1.0 + np.exp(-s_orig))
 
+    n_patches = 0
     if need_img:
-        cams, cam_grid = _gradcam_maps(model, imgs, enc_orig)
-        grid = cam_grid if grid is None else int(grid)
-        if grid > cam_grid:
-            raise ValueError(
-                f"[FAITH IMG GRID] grid={grid} over a {cam_grid}x{cam_grid} Grad-CAM: ranking "
-                f"{grid * grid} patches from {cam_grid ** 2} numbers is nominal precision, not "
-                f"measured. Leave FAITH_IMG_GRID=None to follow the CAM, or raise image_size "
-                f"(the CAM is image_size / {FAITH_CAM_STRIDE}).")
-        img_order_exp = _patch_saliency_order(cams, grid)
+        # The ranking IS the CAM: ranking patches finer than its cells was nominal precision,
+        # and the random arm draws from these same cells so neither arm can reach what the
+        # trimmed border leaves unmeasured.
+        cams, grid = _gradcam_maps(model, imgs, enc_orig)
+        img_order_exp = np.argsort(-cams.reshape(len(cams), -1), axis=1)
         repl = _image_replacement(imgs, sigma=blur_sigma)
-    n_patches = (grid or 0) ** 2
+        n_patches = grid * grid
 
     def _tab_order(exp):
         if exp:

@@ -30,10 +30,39 @@ from keras.callbacks import Callback
 
 PLOT_SHOW = True
 
-# The Grad-CAM grid is `image_size / 32`: 8x8 at 256 px. Trimming a 1-pixel border to avoid
-# padding artifacts costs 44% of the cells at that size, and gives the engine a different map
-# from the one the faithfulness path scores. One map, untrimmed, is the default.
-TRIM_CAM_BORDER = False
+# The Grad-CAM grid is `image_size / 32`: 8x8 at 256 px. The backbone convolves with `same`
+# padding at every stride-2 stage, and TensorFlow puts the odd pad AFTER the signal, so the
+# outer ring of that grid is partly computed from zeros. Untrimmed, the bottom-right cell alone
+# reached a median 0.515 on the canonical population and won the argmax on 31% of the maps: a
+# padding artifact, and one that also sets the normalizing maximum for every other cell.
+CAM_TRIM = 1                        # cells dropped per side: the map is (native - 2) square
+CAM_STRIDE = 32                     # backbone total stride: the native grid is image_size / 32
+CAM_ORIGIN = CAM_TRIM * CAM_STRIDE  # first pixel the trimmed map measures, on both axes
+
+
+def trim_cam_border(x):
+    """Drop the padded outer ring of a `(B, H, W, C)` conv tensor."""
+    s = slice(CAM_TRIM, -CAM_TRIM)
+    return x[:, s, s, :]
+
+
+def cams_from_conv(conv, grads, guided=True):
+    """Grad-CAM maps on the trimmed grid, one per sample, normalized to [0, 1].
+
+    The ONE implementation. The engine below and `xai_faithfulness._gradcam_maps` used to carry
+    a copy each and they drifted: one trimmed the border, the other ranked image patches on the
+    untrimmed map, and the two were read as the same heatmap. Trimming before the channel
+    weights matters as much as trimming the map -- a contaminated cell enters `weights` for
+    every channel, and from there every cell of the result.
+    """
+    conv = trim_cam_border(np.asarray(conv, np.float32))
+    grads = trim_cam_border(np.asarray(grads, np.float32))
+    if guided:
+        grads = np.where((conv > 0) & (grads > 0), grads, 0.0)
+    cam = np.maximum((conv * grads.mean(axis=(1, 2))[:, None, None, :]).sum(axis=-1), 0.0)
+    lo = cam.min(axis=(1, 2), keepdims=True)
+    hi = cam.max(axis=(1, 2), keepdims=True)
+    return (cam - lo) / (hi - lo + 1e-8)
 
 
 def append_epoch_row(path, row, key="epoch"):
@@ -769,16 +798,8 @@ class MultiModalGradCAMEngine:
 
         grads = tape.gradient(loss, conv_out)  # (B, Hc, Wc, C)
 
-        if self.use_guided_grads:
-            grads = (
-                tf.cast(conv_out > 0, grads.dtype)
-                * tf.cast(grads > 0, grads.dtype)
-                * grads
-            )
-
-        # --- CAMs (B, Hc, Wc) ---
-        cams = self._generate_cams(conv_out, grads)  # list of (Hc, Wc)
-        cams = np.stack(cams, axis=0)
+        # --- CAMs (B, Hc, Wc), on the trimmed grid ---
+        cams = cams_from_conv(conv_out, grads, guided=self.use_guided_grads)
         # The RAW heatmaps, exposed so the callback can SAVE them. Until 01/08 this function
         # returned the RGB collage alone: the only traces of the image side were 106 PNGs with
         # the colormap already applied, and no metric can be recovered from those (entropy,
@@ -891,26 +912,6 @@ class MultiModalGradCAMEngine:
             feeds_out.append(baseline if len(kt.shape) == 2 else fed)
         return feeds_out
 
-    def _generate_cams(self, conv_outputs: tf.Tensor, grads: tf.Tensor) -> List[np.ndarray]:
-        """Compute per-sample weighted sum of conv activations; returns list of 2D CAMs normalized to [0,1]."""
-        cams = []
-        conv_np = conv_outputs.numpy() if isinstance(conv_outputs, tf.Tensor) else conv_outputs
-        grads_np = grads.numpy() if isinstance(grads, tf.Tensor) else grads
-        B = conv_np.shape[0]
-        # Trimming the border removes the outer ring of an already tiny grid — at 256 px the CAM
-        # is 8x8, so 28 of 64 cells go — and the faithfulness path scores the untrimmed map.
-        sl = slice(1, -1) if TRIM_CAM_BORDER else slice(None)
-        for i in range(B):
-            gr = grads_np[i][sl, sl, :]
-            co = conv_np[i][sl, sl, :]
-            weights = gr.mean(axis=(0, 1))  # (C,)
-            cam = (co * weights[None, None, :]).sum(axis=-1)
-            cam = np.maximum(cam, 0.0)
-            cam_min, cam_max = cam.min(), cam.max()
-            cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
-            cams.append(cam)
-        return cams
-
     def _format_pred_text(self, pred_row):
         """Format prediction text for display: binary → p=..., multi-class → ŷ=k (p=...)."""
         try:
@@ -931,8 +932,12 @@ class MultiModalGradCAMEngine:
         """Create a 3-panel image (orig+text | heatmap | overlay), each panel HxWx3 in [0,1]."""
         img = self._to_display_rgb(image_like)
         H, W = img.shape[:2]
-        # Heatmap
-        heat = cv2.applyColorMap(np.uint8(255 * cv2.resize(cam_2d, (W, H))),colormap)
+        # Heatmap, drawn on the pixels the trimmed map measures: stretching it to the frame
+        # would move every peak outward by up to one cell.
+        full = np.zeros((H, W), np.float32)
+        full[CAM_ORIGIN:H - CAM_ORIGIN, CAM_ORIGIN:W - CAM_ORIGIN] = cv2.resize(
+            cam_2d, (W - 2 * CAM_ORIGIN, H - 2 * CAM_ORIGIN))
+        heat = cv2.applyColorMap(np.uint8(255 * full), colormap)
         heat = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB) / 255.0
         # Overlay
         overlay = image_weight * img + (1.0 - image_weight) * heat
@@ -1105,7 +1110,8 @@ class MultiModalGradCAMCallback(Callback):
             shape = gradcam_shape_from_cams(by_mode[mode])
             append_epoch_row(self.save_dir / "gradcam_summary.csv",
                              {"epoch_mode": f"{epoch:03d}:{mode}", "epoch": int(epoch),
-                              "mode": mode, "n_cams": int(len(cams)), **shape},
+                              "mode": mode, "n_cams": int(len(cams)),
+                              "cam_grid": int(by_mode[mode].shape[1]), **shape},
                              key="epoch_mode")   # <- two rows per epoch: the key is the pair
 
         # The signal that comes from having BOTH: how much the tabular branch moves visual
