@@ -881,7 +881,8 @@ def _iou_median(A, B):
     return float(np.median(inter / union))
 
 
-def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_TOP_FRAC):
+def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_TOP_FRAC,
+                      out_dir=None):
     """Do two FAMILIES look in the same places more than two SEEDS of one family do?
 
     The effect and its null are the same kind of number: cross-family pairs (two families,
@@ -893,6 +894,10 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
     Two binarizations are carried side by side because a 6x6 map quantizes any overlap
     heavily and a single rule would not show it: `cam_masks` (half of each map's range,
     the convention the engine already uses) and the top `frac` cells of each map.
+
+    With `out_dir` the table is written as `cam_overlap.csv` and stamped with the runs that
+    carried a heatmap — not the ones asked for, which is the difference only this function
+    can see.
     """
     from . import xai_subset as xs
 
@@ -900,7 +905,7 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
         [central.get(i) == t for i, t in zip(master.impl_name, master.setting_tag)]]
     m = xs.drop_ablations(m, "CAM overlap")
 
-    store, fp0 = {}, None
+    store, fp0, used = {}, None, []
     for r in m.itertuples():
         cams, fp = _run_cams(_paths.run_dir_abs(r.run_dir, art_path), mode)
         if cams is None:
@@ -912,6 +917,7 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
                 "[CAM OVERLAP] two runs have Grad-CAM on different samples: the IoU would "
                 f"compare heatmaps of different lesions ({fp0!r} vs {fp!r}).")
         store[(r.impl_name, r.seed)] = (cam_masks(cams), _cam_top_masks(cams, frac))
+        used.append(r.run_id)
 
     fams = sorted({f for f, _ in store})
     seeds = sorted({s for _, s in store})
@@ -932,4 +938,9 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
                     rows.append(dict(pair_kind="seed_null", impl_a=f, impl_b=f,
                                      seed_a=sa, seed_b=sb, iou_half=_iou_median(A[0], B[0]),
                                      iou_top=_iou_median(A[1], B[1])))
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if out_dir:
+        path = os.path.join(out_dir, "cam_overlap.csv")
+        xs.stamp_aggregate(path, used, aggregate="cam_overlap.csv", mode=mode, frac=frac)
+        out.to_csv(path, index=False)
+    return out

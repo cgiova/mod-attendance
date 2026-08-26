@@ -596,6 +596,29 @@ REGISTRY_COLS = ("impl_name", "exp_tag", "setting_tag", "run_id", "seed", "best_
                  "best_val_auc", "run_dir", "model_name")
 
 
+def _alpha_final(run_dir, best_epoch):
+    """The learned alpha the best checkpoint holds, or None where the run logged no trajectory.
+
+    The runner writes `single_run_summary.csv` before anything reads the trained layer back, so
+    the learned alpha reaches disk only in `alpha_trajectory.csv` and in the study-level
+    `combined_summary.csv` -- the aggregate this registry refuses. The row to take is
+    `best_epoch`: `restore_best_weights` lets training run past it, and the last row is then the
+    alpha of an epoch the checkpoint does not hold.
+    """
+    import pandas as pd
+
+    traj = os.path.join(run_dir, "alpha_trajectory.csv")
+    if not os.path.exists(traj):
+        return None
+    a = pd.read_csv(traj).set_index("epoch")["alpha"]
+    if best_epoch not in a.index:
+        raise RuntimeError(
+            f"[REGISTRY] {traj}: epochs {a.index.min()}..{a.index.max()} do not cover "
+            f"best_epoch={best_epoch}. Falling back to the last row would register the alpha "
+            f"of an epoch the checkpoint does not hold.")
+    return float(a.loc[best_epoch])
+
+
 def build_registry(canonical, n_expected=None):
     """One row per run of the declared studies, read from the per-run summaries.
 
@@ -609,6 +632,9 @@ def build_registry(canonical, n_expected=None):
     columns and leave that family's `setting_tag` and `run_dir` at NaN, invisible to every
     `groupby`. The per-run summary is the artifact each run writes for itself, so a schema
     that is not the one the others carry is a fact about a single run and is named as such.
+
+    A family that logs an `alpha_trajectory.csv` also gets `alpha_final`, the value its best
+    checkpoint holds: the per-run summary is written before it exists.
     """
     import glob as _glob
     import pandas as pd
@@ -632,6 +658,11 @@ def build_registry(canonical, n_expected=None):
                 raise RuntimeError(
                     f"[REGISTRY] {f}: declares impl_name={df.impl_name.iloc[0]!r} under the "
                     f"study of {impl!r}")
+            # `os.path.dirname(f)`, not the recorded `run_dir`: that one is the path of the
+            # machine that trained, and the artifact being read is here.
+            alpha = _alpha_final(os.path.dirname(f), int(df.best_epoch.iloc[0]))
+            if alpha is not None:
+                df["alpha_final"] = alpha
             frames.append(df)
 
     master = pd.concat(frames, ignore_index=True)

@@ -1336,6 +1336,37 @@ _okF26, _msgF26 = raises(lambda: xs26.build_registry({"adaptive_gating": _wrong2
 check("F. a run filed under another family's study RAISES: the study directory is not "
       "evidence of what the run is", _okF26, _msgF26)
 
+# The learned alpha of `learnable_scaling`: the runner writes the summary before anything reads
+# the trained layer back, so the value exists only in the per-epoch trajectory and in the study
+# aggregate this registry refuses.
+_TRAJ26 = os.path.join(_ROOT26, "trajectory")
+_stL26 = os.path.join(_TRAJ26, "learnable_scaling", "20260101-000000")
+_stV26 = os.path.join(_TRAJ26, "vanilla", "20260101-000000")
+_rowL26 = _run26(_stL26, "learnable_scaling", 8, "init_a0p500")     # the summary says best_epoch=3
+_run26(_stV26, "vanilla", 8, "baseline")
+_TCSV26 = os.path.join(_rowL26["run_dir"], "alpha_trajectory.csv")
+pd.DataFrame({"epoch": [-1, 0, 1, 2, 3, 4], "alpha": [.50, .51, .52, .53, .54, .55],
+              "beta": [.50, .49, .48, .47, .46, .45]}).to_csv(_TCSV26, index=False)
+
+_regG26 = xs26.build_registry({"learnable_scaling": _stL26, "vanilla": _stV26}, n_expected=2)
+_aG26 = _regG26.set_index("impl_name")["alpha_final"]
+check("G. the learned alpha enters the registry at `best_epoch`, not at the last epoch the "
+      "trajectory holds, and a family that logs none stays NaN",
+      _aG26["learnable_scaling"] == 0.53 and pd.isna(_aG26["vanilla"]),
+      f"best_epoch=3 -> {_aG26['learnable_scaling']}, last row 0.55, vanilla "
+      f"{_aG26['vanilla']}")
+
+check("H. the OLD code stays silent on the same run: the summary the runner wrote carries no "
+      "learned alpha, so no registry built from it could carry one",
+      "alpha_final" not in pd.read_csv(
+          os.path.join(_rowL26["run_dir"], "single_run_summary.csv")).columns,
+      "the value reaches disk only in alpha_trajectory.csv and combined_summary.csv")
+
+pd.DataFrame({"epoch": [-1, 0, 1], "alpha": [.50, .51, .52]}).to_csv(_TCSV26, index=False)
+_okI26, _msgI26 = raises(lambda: xs26.build_registry({"learnable_scaling": _stL26}))
+check("I. a trajectory that stops before `best_epoch` RAISES: falling back to its last row "
+      "registers the alpha of an epoch the checkpoint does not hold", _okI26, _msgI26)
+
 # ======================================================================= 27 ===
 section("27. POST-HOC CONTRACT — the properties that live only in notebook cells")
 # The counterpart of section 15 for the post-hoc notebook: who is explained and who is

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import glob
 import os
-import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
@@ -260,52 +259,43 @@ SIGNED_MODES = ("abs", "posev", "negev", "target")
 def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
     """Map every CANONICAL run to its available per-sample curve files.
 
-    The canonical registry is ``summaries/master_results_rows.csv`` (110 runs).  This
-    filter matters: ``runs/`` holds 130 ``faithfulness_curves.npz`` files, the extra 20
-    being superseded study dirs and seed_49 -- analysing them unfiltered shifts the
-    family means (see STATUS: controlled_fusion +0.070 vs +0.149).
+    The canonical registry is ``summaries/master_results_rows.csv``: only the runs it lists
+    are read, so a superseded study dir left under ``runs/`` cannot shift a family mean.
+
+    ``@@FAITH_LOOP@@`` writes TWO rankings per run and ``source`` keeps them apart:
+    ``canonical`` is the logit-aligned Permutation (``tab_ranking="override"``, under
+    ``xai/faithfulness/``), ``gradient`` is the SHAP GradientExplainer
+    (``tab_ranking="shap_gradient"``, under ``xai/faith_gradient/``).  Same curves, two
+    attributors: they sit side by side and are never averaged together.
 
     ``include_signed`` adds the ``aligned_signed`` runs, which carry FOUR npz per run
     (one per ranking convention), so a row is keyed by (run, source, **mode**) -- the
     ``mode`` column is what keeps abs/posev/negev/target from being pooled together
-    downstream.  Off by default: the signed protocol covers 6 runs, one per family,
-    picked for convenience.
+    downstream.  Off by default, because the signed modes answer a different question than
+    the two rankings above and pooling them into one table would compare conventions.
 
     Returns a DataFrame with one row per (run, source, mode).
     """
-    runs_path = os.path.join(art_path, "runs")
     if master_rows_csv is None:
         master_rows_csv = os.path.join(art_path, "summaries", "master_results_rows.csv")
 
     master = pd.read_csv(master_rows_csv)
-    aligned_root = os.path.join(runs_path, "_robustness", "stage2_aligned_attr")
-    signed_root = os.path.join(runs_path, "_robustness", "aligned_signed")
-
     rows = []
     for _, r in master.iterrows():
         # run_dir in the CSV is an absolute path from another machine/session; re-root it.
         run_dir = _paths.run_dir_abs(r.run_dir, art_path)
 
-        canonical = os.path.join(run_dir, "xai", "faithfulness", "faithfulness_curves.npz")
-        aligned = os.path.join(aligned_root, str(r.run_id), "faithfulness_aligned_attr_curves.npz")
-
-        found = [("canonical", "abs", canonical), ("aligned", "abs", aligned)]
+        found = [("canonical", "abs",
+                  os.path.join(run_dir, "xai", "faithfulness", "faithfulness_curves.npz")),
+                 ("gradient", "abs",
+                  os.path.join(run_dir, "xai", "faith_gradient", "faithfulness_curves.npz"))]
         if include_signed:
-            # WHERE the signed curves live. Since 01/08 `aligned_signed_faithfulness` writes them
-            # inside the run (`xai/shap_tab/`), on the distinct-lesion sample: 110 runs x 4
-            # modes = 440 files. The old root `_robustness/aligned_signed/` holds 24 of them,
-            # from 6 runs on the PREFIX, picked for convenience — reading it means publishing
-            # family means with n_runs=1 on a superseded sample.
-            # Per-run FIRST, the old root as a fallback: this way a run already redone is never
-            # read from the old copy, and the runs that are not stay visible.
-            sdir_run = os.path.join(run_dir, "xai", "shap_tab")
-            sdir_old = os.path.join(signed_root, str(r.run_id))
+            # `aligned_signed_faithfulness` writes them inside the run, one npz per mode, on
+            # the same sample as everything else: there is one place they can come from.
+            sdir = os.path.join(run_dir, "xai", "shap_tab")
             for m in SIGNED_MODES:
-                fname = f"faithfulness_aligned_signed_{m}_curves.npz"
-                p_run = os.path.join(sdir_run, fname)
                 found.append(("aligned_signed", m,
-                              p_run if os.path.exists(p_run)
-                              else os.path.join(sdir_old, fname)))
+                              os.path.join(sdir, f"faithfulness_aligned_signed_{m}_curves.npz")))
 
         for source, mode, path in found:
             if os.path.exists(path):
@@ -314,27 +304,7 @@ def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
                     "setting_tag": r.setting_tag, "source": source, "mode": mode,
                     "npz_path": path,
                 })
-    out = pd.DataFrame(rows)
-
-    # The fallback above is convenient and has a hole: were ONE run to lack its per-run file,
-    # it would be taken from the old root — that is, from the PREFIX — and would land in the
-    # same family mean as 109 runs on the distinct-lesion sample, with no error. It is the
-    # shape of defect that has already cost twice (`combined_faithfulness.csv` at 130 rows,
-    # `lore_sa_quality` with two `pos_rate`). Nothing is guessed here: it is said.
-    if len(out) and (out.source == "aligned_signed").any():
-        sg = out[out.source == "aligned_signed"]
-        per_run = sg.npz_path.str.contains(os.sep + "shap_tab" + os.sep)
-        if per_run.any() and (~per_run).any():
-            mixed = sorted(sg.loc[~per_run, "run_id"].unique())
-            warnings.warn(
-                f"[CURVE FILES] the `aligned_signed` curves come from TWO samples: "
-                f"{int(per_run.sum())} files from the runs (distinct lesions) and "
-                f"{int((~per_run).sum())} from _robustness/aligned_signed (prefix).\n"
-                f"  Runs still on the prefix: {mixed[:6]}{' ...' if len(mixed) > 6 else ''}\n"
-                f"  Averaging them together mixes two populations. Redo those runs, or "
-                f"filter on `npz_path.str.contains('shap_tab')`.", RuntimeWarning,
-                stacklevel=2)
-    return out
+    return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------------------
@@ -342,12 +312,11 @@ def discover_curve_files(art_path, master_rows_csv=None, include_signed=False):
 # --------------------------------------------------------------------------------------
 
 # (source, method) pairs worth reading, and the budget cutoffs to integrate to.
-# The aligned attributor was only ever run with methods=("tabular",), but it DID save the
-# insertion curves -- REPORT_S sec.2's "deletion only" is inaccurate, and `ins` below
-# surfaces the insertion column at no cost.
+# The gradient ranking covers the tabular and joint branches only: on the image branch the
+# ranking is Grad-CAM in both passes, so it would be the same curve read twice.
 DEFAULT_METHODS = {
     "canonical": ("tabular", "image", "joint"),
-    "aligned": ("tabular",),
+    "gradient": ("tabular", "joint"),
     "aligned_signed": ("tabular",),
 }
 DEFAULT_Q_MAX = (0.20, None)   # None = full budget (0.60), the pre-specified metric

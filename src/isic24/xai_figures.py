@@ -33,7 +33,8 @@ def fig_dir(art_path=None):
     return d
 
 
-def read_arms(art_path=None, method="image", files=None, q_max=xs.Q_CLEAN, central=None):
+def read_arms(art_path=None, method="image", files=None, q_max=xs.Q_CLEAN, central=None,
+              source="canonical"):
     """Mean curve and arm areas of every canonical run, endpoints excluded.
 
     The area of a mean curve equals the mean of the per-sample areas (the integral is
@@ -42,6 +43,8 @@ def read_arms(art_path=None, method="image", files=None, q_max=xs.Q_CLEAN, centr
     budget window, the `gain_norm` scale the report quotes.
 
     ``central`` restricts to one setting per family, the population sec. 3.6 reports.
+    ``source`` picks the ranking: ``canonical`` is the logit-aligned Permutation,
+    ``gradient`` the SHAP GradientExplainer. One figure each; they are never overlaid.
 
     Returns ``(q_grid, curves, per_run)``: `curves` maps ``"<direction>_<arm>"`` to a
     ``(n_runs, n_q)`` array, `per_run` carries the arm rates over ``q <= q_max``.
@@ -49,7 +52,7 @@ def read_arms(art_path=None, method="image", files=None, q_max=xs.Q_CLEAN, centr
     art_path = str(art_path or _paths.art_path())
     if files is None:
         files = xf.discover_curve_files(art_path)
-    files = xs.drop_ablations(files[files.source == "canonical"], "report figures")
+    files = xs.drop_ablations(files[files.source == source], "report figures")
     if central:
         files = files[[central.get(i) == t
                        for i, t in zip(files.impl_name, files.setting_tag)]]
@@ -75,7 +78,7 @@ def read_arms(art_path=None, method="image", files=None, q_max=xs.Q_CLEAN, centr
 
 
 def arms(art_path=None, method="image", out_dir=None, files=None, central=xs.CENTRAL_SETTINGS,
-         fname="fig_faithfulness_arms.png"):
+         fname=None, source="canonical"):
     """Sec. 3.6 — deletion is a faithfulness metric, insertion measures its own baseline.
 
     Left and centre: the two arms, mean over runs with a +-1 sd band, the shaded area
@@ -84,7 +87,8 @@ def arms(art_path=None, method="image", out_dir=None, files=None, central=xs.CEN
     """
     from scipy.stats import spearmanr
 
-    q, curves, per_run = read_arms(art_path, method=method, files=files, central=central)
+    q, curves, per_run = read_arms(art_path, method=method, files=files, central=central,
+                                   source=source)
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.4))
 
     clean = q <= xs.Q_CLEAN + 1e-12
@@ -118,6 +122,10 @@ def arms(art_path=None, method="image", out_dir=None, files=None, central=xs.CEN
     ax.grid(alpha=.25); ax.legend(fontsize=7.5, loc="upper right", framealpha=.9)
 
     pop = "central settings" if central else "non-endpoint runs"
-    fig.suptitle(f"Image faithfulness by arm — {method}, {len(per_run)} runs ({pop})", y=1.0)
-    _finalize_plot(out_dir or fig_dir(art_path), fname)
+    fig.suptitle(f"Faithfulness by arm — {method}, {source} ranking, "
+                 f"{len(per_run)} runs ({pop})", y=1.0)
+    # The name carries ranking AND branch: five figures come out of this call, and none of
+    # them may land on the name another one holds.
+    _finalize_plot(out_dir or fig_dir(art_path),
+                   fname or f"fig_faithfulness_arms_{source}_{method}.png")
     return per_run
