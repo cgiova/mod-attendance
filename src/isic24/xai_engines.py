@@ -1,13 +1,13 @@
 """Explainability engines for the modality-attendance study.
 
-Moved verbatim out of the notebooks (training cells 26/28/33) so that SHAP, Grad-CAM and
-LORE can be run against ANY saved checkpoint, not only during the run that trained it.
-The bodies are unchanged; see `xai_driver` for the orchestration that used to live in
-the training notebook's shared runner.
+Moved out of the notebooks so that SHAP and Grad-CAM can be run against ANY saved
+checkpoint, not only during the run that trained it. See `xai_driver` for the orchestration
+that used to live in the training notebook's shared runner.
 
-Where a helper existed in two cells, the version kept here is the one that ACTUALLY RAN:
-cell 33 executes after cell 26 and shadows its plot helpers, so every published figure
-used cell 33's (coarser `fmt="{:.2f}"`) barplot.
+LORE lives in `xai_lore_sa`, and only there. The engine that ran on `xailib` was removed
+once the runs it produced had been archived: it was not the default since 2026-07-29, and
+the reason it had been kept -- reproducing the `lore_fidelity` column of the registry --
+went away with the finding that no canonical run carries that column.
 """
 
 import os
@@ -30,15 +30,49 @@ from keras.callbacks import Callback
 
 PLOT_SHOW = True
 
+# The Grad-CAM grid is `image_size / 32`: 8x8 at 256 px. The backbone convolves with `same`
+# padding at every stride-2 stage, and TensorFlow puts the odd pad AFTER the signal, so the
+# outer ring of that grid is partly computed from zeros. Untrimmed, the bottom-right cell alone
+# reached a median 0.515 on the canonical population and won the argmax on 31% of the maps: a
+# padding artifact, and one that also sets the normalizing maximum for every other cell.
+CAM_TRIM = 1                        # cells dropped per side: the map is (native - 2) square
+CAM_STRIDE = 32                     # backbone total stride: the native grid is image_size / 32
+CAM_ORIGIN = CAM_TRIM * CAM_STRIDE  # first pixel the trimmed map measures, on both axes
+
+
+def trim_cam_border(x):
+    """Drop the padded outer ring of a `(B, H, W, C)` conv tensor."""
+    s = slice(CAM_TRIM, -CAM_TRIM)
+    return x[:, s, s, :]
+
+
+def cams_from_conv(conv, grads, guided=True):
+    """Grad-CAM maps on the trimmed grid, one per sample, normalized to [0, 1].
+
+    The ONE implementation. The engine below and `xai_faithfulness._gradcam_maps` used to carry
+    a copy each and they drifted: one trimmed the border, the other ranked image patches on the
+    untrimmed map, and the two were read as the same heatmap. Trimming before the channel
+    weights matters as much as trimming the map -- a contaminated cell enters `weights` for
+    every channel, and from there every cell of the result.
+    """
+    conv = trim_cam_border(np.asarray(conv, np.float32))
+    grads = trim_cam_border(np.asarray(grads, np.float32))
+    if guided:
+        grads = np.where((conv > 0) & (grads > 0), grads, 0.0)
+    cam = np.maximum((conv * grads.mean(axis=(1, 2))[:, None, None, :]).sum(axis=-1), 0.0)
+    lo = cam.min(axis=(1, 2), keepdims=True)
+    hi = cam.max(axis=(1, 2), keepdims=True)
+    return (cam - lo) / (hi - lo + 1e-8)
+
 
 def append_epoch_row(path, row, key="epoch"):
     """Append one per-epoch row, REPLACING any existing row for the same epoch.
 
-    These two CSVs (`shap_summary.csv`, `lore_fidelity_per_epoch.csv`) were opened in
-    plain append mode. That was harmless while they were only ever written once, during
-    the run that trained the model. It stops being harmless now that the whole point is
-    to re-run the engines post-hoc against an existing `run_dir`: a second pass appended
-    a duplicate epoch, and `plot_lore_fidelity_vs_val_auc_by_epoch` reads the second file.
+    The per-epoch CSVs were opened in plain append mode. That was harmless while they were
+    only ever written once, during the run that trained the model. It stops being harmless
+    now that the whole point is to re-run the engines post-hoc against an existing
+    `run_dir`: a second pass appended a duplicate epoch, and whoever read the file by epoch
+    got two rows where the run has one.
     """
     path = Path(path)
     new = pd.DataFrame([row])
@@ -226,15 +260,15 @@ def plot_shap_scatter_top4_numeric(
 # --------------------------------------------------------------------------------------
 
 def aggregate_raw_importance(encoded_feature_names, mean_abs_vec):
-    """Somma le dimensioni encoded sulla feature RAW da cui vengono.
+    """Sum the encoded dimensions onto the RAW feature they come from.
 
-    La mappatura sta in `xai_metrics.raw_name_for`, un posto solo. Qui c'era
-    `name.startswith("age_approx_bin_")` scritto a mano: su ISIC24 e' equivalente (l'unica
-    feature discretizzata e' `age_approx`), ma il notebook costruisce i nomi con
-    `f"{name}_bin_{b}"` per OGNI `Discretization`. Su un dataset con una seconda feature
-    discretizzata questa funzione avrebbe mappato `foo_bin_0` sul raw `"foo_bin_0"` invece
-    che su `"foo"` — in silenzio, e in disaccordo con `encoded_indices_for_raw` qui sopra,
-    che il `_bin_` lo gestisce generico. Trovato il 2026-08-01.
+    The mapping lives in `xai_metrics.raw_name_for`, in one place. There used to be a
+    hand-written `name.startswith("age_approx_bin_")` here: on ISIC24 it is equivalent (the
+    only discretized feature is `age_approx`), but the notebook builds the names with
+    `f"{name}_bin_{b}"` for EVERY `Discretization`. On a dataset with a second discretized
+    feature this function would have mapped `foo_bin_0` onto the raw `"foo_bin_0"` instead of
+    onto `"foo"` — silently, and disagreeing with `encoded_indices_for_raw` above, which
+    handles `_bin_` generically. Found on 2026-08-01.
     """
     from .xai_metrics import raw_name_for
     agg = {}
@@ -453,9 +487,9 @@ class ShapCallback(Callback):
         max_samples: int = 512,   # total samples in explanation set
         max_batches: int | None = None,  # limit num batches to read, or None
         rng_seed: int = 0,
-        subset_idx=None,           # indici POSIZIONALI in validation_df; None = prefisso
-        subset_fingerprint=None,   # stampigliato nell'npz: senza, i file non sono
-                                   # riutilizzabili sotto un campione diverso (guard in
+        subset_idx=None,           # POSITIONAL indices in validation_df; None = prefix
+        subset_fingerprint=None,   # stamped into the npz: without it the files are not
+                                   # reusable under a different sample (guard in
                                    # xai_faithfulness._load_shap_values)
     ):
         super().__init__()
@@ -546,8 +580,8 @@ class ShapCallback(Callback):
         if self.subset_idx is not None:
             if n_collected <= int(self.subset_idx.max()):
                 raise RuntimeError(
-                    f"il subset chiede la riga {int(self.subset_idx.max())} ma ne sono state "
-                    f"lette {n_collected}: alza max_samples/max_batches di ShapCallback.")
+                    f"the subset asks for row {int(self.subset_idx.max())} and only "
+                    f"{n_collected} were read: raise max_samples/max_batches on ShapCallback.")
             self._images = self._images[self.subset_idx]
             self._features = self._features[self.subset_idx]
             self._labels = self._labels[self.subset_idx]
@@ -591,6 +625,13 @@ class ShapCallback(Callback):
         epoch_dir = self.base_dir / epoch_name
         epoch_dir.mkdir(parents=True, exist_ok=True)
 
+        from . import xai_subset as xs
+        # The explained validation rows and their identity: `explained_indices` are positions
+        # INSIDE the sample, so on their own they do not say which lesions those are.
+        vi = (None if self.subset_idx is None
+              else np.asarray(self.subset_idx, int)[
+                  np.asarray(stats["explained_indices"], int)])
+
         # Persist arrays + tabular share for post-hoc analysis
         np.savez_compressed(
             epoch_dir / f"shap_arrays_{epoch_name}.npz",
@@ -600,22 +641,20 @@ class ShapCallback(Callback):
             mean_abs_all=mean_abs_all,
             mean_abs_pos=mean_abs_pos,
             mean_abs_neg=mean_abs_neg,
-            # L'impronta del campione: `explained_indices` sono POSIZIONI, quindi senza
-            # questa un npz non e' distinguibile da uno prodotto su altre righe.
+            # The sample fingerprint: `explained_indices` are POSITIONS, so without it an npz
+            # cannot be told from one produced on other rows.
             **({} if self.subset_fingerprint is None
                else {"subset_fingerprint": str(self.subset_fingerprint)}),
-            # La POSIZIONE IN `validation_df` di ogni campione spiegato — la stessa chiave,
-            # con lo stesso significato, che scrivono Grad-CAM (`gradcam_arrays_*.npz`) e
-            # LORE (colonna `val_index` nel per-sample CSV).
+            # The POSITION IN `validation_df` of every explained sample, and its row id — the
+            # same two keys, with the same meaning, that Grad-CAM (`gradcam_arrays_*.npz`),
+            # LORE (per-sample CSV) and faithfulness write.
             #
-            # Serve perche' `explained_indices` NON e' quella cosa: sono posizioni DENTRO il
-            # campione (0..n-1), quindi due motori sullo stesso campione producono indici
-            # che si somigliano e non sono confrontabili. E' esattamente il modo in cui
-            # l'accordo SHAP<->LORE usciva NaN. Con `val_index` i tre motori si riallineano
-            # per costruzione, senza dover sapere come e' stato costruito il campione.
-            **({} if self.subset_idx is None
-               else {"val_index": np.asarray(self.subset_idx, int)[
-                   np.asarray(stats["explained_indices"], int)]}),
+            # They are needed because `explained_indices` is NOT that thing: those are positions
+            # INSIDE the sample (0..n-1), so two engines on the same sample produce indices that
+            # look alike and are not comparable. That is exactly how the SHAP<->LORE agreement
+            # came out NaN. And a position alone does not survive a rebuild of the fold: the
+            # identity does, and it is `row_id`.
+            **({} if vi is None else {"val_index": vi, **xs.stamp_row_ids(vi)}),
         )
 
         # Tabular share = sum |SHAP| over tabular dims / total. Here all encoded features
@@ -627,11 +666,11 @@ class ShapCallback(Callback):
         top1_share = float(mean_abs_all.max() / (total_abs + 1e-12))
         top5_share = float(np.sort(mean_abs_all)[::-1][:5].sum() / (total_abs + 1e-12))
 
-        # Metriche di FORMA (leggibilita'): compattezza per entropia e k90 sparsity, dalle
-        # stesse attribuzioni che sono gia' in memoria. Escono qui, con tutto il resto,
-        # invece che da una cella da lanciare dopo. Sono un COMPLEMENTO: `shap_mass` accanto
-        # dice se c'e' qualcosa da spiegare — con il ramo tabellare spento la compattezza
-        # sarebbe 1.000 (il massimo) e `xai_metrics` la mette a NaN apposta.
+        # SHAPE metrics (readability): entropy compactness and k90 sparsity, from the same
+        # attributions already in memory. They come out here, with everything else, rather than
+        # from a cell to launch afterwards. They are a COMPLEMENT: `shap_mass` beside them says
+        # whether there is anything to explain — with the tabular branch off, compactness would
+        # be 1.000 (the maximum) and `xai_metrics` sets it to NaN on purpose.
         from .xai_metrics import shap_shape_from_values
         shape = shap_shape_from_values(shap_vals, stats["explained_indices"])
 
@@ -759,30 +798,22 @@ class MultiModalGradCAMEngine:
 
         grads = tape.gradient(loss, conv_out)  # (B, Hc, Wc, C)
 
-        if self.use_guided_grads:
-            grads = (
-                tf.cast(conv_out > 0, grads.dtype)
-                * tf.cast(grads > 0, grads.dtype)
-                * grads
-            )
-
-        # --- CAMs (B, Hc, Wc) ---
-        cams = self._generate_cams(conv_out, grads)  # list of (Hc, Wc)
-        cams = np.stack(cams, axis=0)
-        # Le heatmap GREZZE, esposte perche' il callback possa SALVARLE. Fino al 01/08 questa
-        # funzione restituiva solo il collage RGB: le uniche tracce del lato immagine erano
-        # 106 PNG con la colormap gia' applicata, e da li' non si ricava nessuna metrica
-        # (entropia, area attivata, componenti connesse, IoU fra configurazioni). Non e' nel
-        # valore di ritorno per non rompere i chiamanti che spacchettano tre elementi.
+        # --- CAMs (B, Hc, Wc), on the trimmed grid ---
+        cams = cams_from_conv(conv_out, grads, guided=self.use_guided_grads)
+        # The RAW heatmaps, exposed so the callback can SAVE them. Until 01/08 this function
+        # returned the RGB collage alone: the only traces of the image side were 106 PNGs with
+        # the colormap already applied, and no metric can be recovered from those (entropy,
+        # activated area, connected components, IoU between configurations). It is not in the
+        # return value so as not to break callers that unpack three elements.
         self.last_cams = cams
         self.last_preds = preds.numpy() if isinstance(preds, tf.Tensor) else preds
 
         # --- Triptychs with display images ---
         triptychs = []
         preds_np = self.last_preds
-        # Il collage cresce come il batch: a n=144 sarebbe un PNG enorme che nessuno guarda,
-        # e comporlo costa piu' del Grad-CAM stesso. Oltre `max_grid` si salvano solo gli
-        # array, che sono il pezzo che serve.
+        # The collage grows with the batch: at n=144 it would be an enormous PNG nobody looks
+        # at, and composing it costs more than Grad-CAM itself. Beyond `max_grid` only the
+        # arrays are saved, which are the piece that matters.
         n_vis = min(images.shape[0], int(getattr(self, "max_grid", 8)))
         for i in range(n_vis):
             pred_text = self._format_pred_text(preds_np[i])
@@ -881,24 +912,6 @@ class MultiModalGradCAMEngine:
             feeds_out.append(baseline if len(kt.shape) == 2 else fed)
         return feeds_out
 
-    def _generate_cams(self, conv_outputs: tf.Tensor, grads: tf.Tensor) -> List[np.ndarray]:
-        """Compute per-sample weighted sum of conv activations; returns list of 2D CAMs normalized to [0,1]."""
-        cams = []
-        conv_np = conv_outputs.numpy() if isinstance(conv_outputs, tf.Tensor) else conv_outputs
-        grads_np = grads.numpy() if isinstance(grads, tf.Tensor) else grads
-        B = conv_np.shape[0]
-        for i in range(B):
-            # exclude 1-pixel border to avoid padding artifacts
-            gr = grads_np[i][1:-1, 1:-1, :]
-            co = conv_np[i][1:-1, 1:-1, :]
-            weights = gr.mean(axis=(0, 1))  # (C,)
-            cam = (co * weights[None, None, :]).sum(axis=-1)
-            cam = np.maximum(cam, 0.0)
-            cam_min, cam_max = cam.min(), cam.max()
-            cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
-            cams.append(cam)
-        return cams
-
     def _format_pred_text(self, pred_row):
         """Format prediction text for display: binary → p=..., multi-class → ŷ=k (p=...)."""
         try:
@@ -919,8 +932,12 @@ class MultiModalGradCAMEngine:
         """Create a 3-panel image (orig+text | heatmap | overlay), each panel HxWx3 in [0,1]."""
         img = self._to_display_rgb(image_like)
         H, W = img.shape[:2]
-        # Heatmap
-        heat = cv2.applyColorMap(np.uint8(255 * cv2.resize(cam_2d, (W, H))),colormap)
+        # Heatmap, drawn on the pixels the trimmed map measures: stretching it to the frame
+        # would move every peak outward by up to one cell.
+        full = np.zeros((H, W), np.float32)
+        full[CAM_ORIGIN:H - CAM_ORIGIN, CAM_ORIGIN:W - CAM_ORIGIN] = cv2.resize(
+            cam_2d, (W - 2 * CAM_ORIGIN, H - 2 * CAM_ORIGIN))
+        heat = cv2.applyColorMap(np.uint8(255 * full), colormap)
         heat = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB) / 255.0
         # Overlay
         overlay = image_weight * img + (1.0 - image_weight) * heat
@@ -1003,25 +1020,25 @@ class MultiModalGradCAMCallback(Callback):
         self.class_index = class_index
         self.layer_name = layer_name
         self.tag = tag
-        # DUE MODI, uno stesso caricamento. `image_only` azzera le feature tabellari e
-        # chiede "dove guarderebbe SENZA il tabellare"; `context` usa le feature vere e
-        # chiede "dove guarda davvero". Per uno studio sull'attendance servono entrambi, e
-        # la loro DIFFERENZA (IoU fra le due maschere) e' essa stessa un segnale: quanto il
-        # ramo tabellare sposta l'attenzione visiva.
+        # TWO MODES, one same loading. `image_only` zeroes the tabular features and asks
+        # "where would it look WITHOUT the tabular branch"; `context` uses the real features and
+        # asks "where does it actually look". An attendance study needs both, and their
+        # DIFFERENCE (IoU between the two masks) is itself a signal: how much the tabular branch
+        # moves visual attention.
         #
-        # Costano poco insieme perche' il caro e' altrove: caricare il checkpoint e leggere
-        # il dataset fino alle 144 lesioni si paga UNA volta per run, il passo di gradiente
-        # e' l'unica cosa che raddoppia.
+        # They cost little together because the expense is elsewhere: loading the checkpoint and
+        # reading the dataset up to the 144 lesions is paid ONCE per run, and the gradient step
+        # is the only thing that doubles.
         #
-        # `modes=None` = comportamento storico: un modo solo, quello del motore.
+        # `modes=None` = the historical behaviour: one mode only, the engine's own.
         self.modes = tuple(modes) if modes else (engine.mode,)
-        # Le POSIZIONI in validation_df delle immagini nel probe batch, e l'impronta del
-        # campione. Servono a rendere le heatmap riallineabili con SHAP e LORE: fino al
-        # 01/08 Grad-CAM girava sulle prime 8 righe e non lasciava traccia di quali fossero.
+        # The POSITIONS in validation_df of the images in the probe batch, and the sample
+        # fingerprint. They make the heatmaps realignable with SHAP and LORE: until 01/08
+        # Grad-CAM ran on the first 8 rows and left no trace of which they were.
         self.subset_idx = subset_idx
         self.subset_fingerprint = subset_fingerprint
-        # Quante immagini per passo di gradiente. None = tutte insieme (comportamento
-        # storico, che a n=8 andava bene e a n=144 esaurisce la GPU).
+        # How many images per gradient step. None = all at once (the historical behaviour,
+        # fine at n=8 and out of GPU memory at n=144).
         self.batch_size = batch_size
         self.save_dir = Path(save_dir) if save_dir else None
         if self.save_dir:
@@ -1034,11 +1051,11 @@ class MultiModalGradCAMCallback(Callback):
 
         for mode in self.modes:
             self.engine.mode = mode
-            # A CHUNK, non tutto insieme. Con 144 immagini in un solo `GradientTape` e i
-            # guided gradients servono ~22 GiB solo di attivazioni (misurato 01/08:
-            # ResourceExhaustedError su un tensore (144, 8, 8, 1248) con 23.9 GiB di GPU).
-            # Grad-CAM e' per campione: non c'e' nessuna dipendenza fra immagini, quindi
-            # spezzare il batch da' lo STESSO risultato con memoria costante.
+            # IN CHUNKS, not all at once. With 144 images in a single `GradientTape` the guided
+            # gradients need some 22 GiB of activations alone (measured 01/08:
+            # ResourceExhaustedError on a (144, 8, 8, 1248) tensor with 23.9 GiB of GPU).
+            # Grad-CAM is per sample: there is no dependency between images, so splitting the
+            # batch gives the SAME result at constant memory.
             xb, yb = self.probe_batch
             n_tot = int(len(next(iter(xb.values()))))
             step = max(1, int(self.batch_size or n_tot))
@@ -1054,13 +1071,13 @@ class MultiModalGradCAMCallback(Callback):
                 cams_parts.append(np.asarray(self.engine.last_cams))
                 preds_parts.append(np.asarray(p))
                 if grid is None:
-                    grid = g          # il collage viene dal primo chunk: e' un'anteprima
+                    grid = g          # the collage comes from the first chunk: it is a preview
             self.engine.last_cams = np.concatenate(cams_parts, axis=0)
             preds = np.concatenate(preds_parts, axis=0)
             if not self.save_dir:
                 continue
-            # Nome storico con un modo solo (`epoch_003.png`), suffissato con due: le run
-            # canoniche restano leggibili dagli script che le cercano per quel nome.
+            # The historical name under a single mode (`epoch_003.png`), suffixed under two:
+            # the canonical runs stay readable by whatever looks for them under that name.
             sfx = "" if single else f"_{mode}"
             out = (np.clip(grid, 0, 1) * 255).astype(np.uint8)
             cv2.imwrite(str(self.save_dir / f"epoch_{epoch:03d}{sfx}.png"),
@@ -1072,39 +1089,42 @@ class MultiModalGradCAMCallback(Callback):
             by_mode[mode] = np.asarray(cams, np.float32)
             preds_by_mode[mode] = np.asarray(preds, np.float32).reshape(len(cams), -1)
 
-            # LE HEATMAP GREZZE: precondizione di ogni metrica sul lato immagine. Da un PNG
-            # con la colormap applicata non si ricava ne' entropia ne' area ne' IoU.
-            # `val_index` le accompagna per lo stesso motivo per cui accompagna le regole
-            # LORE: senza, non si sa QUALI lesioni sono state spiegate.
+            # THE RAW HEATMAPS: the precondition of every image-side metric. From a PNG with
+            # the colormap applied neither entropy nor area nor IoU can be recovered.
+            # `val_index` and `row_id` come with them for the same reason they come with the LORE
+            # rules: without them, WHICH lesions are explained is unknown.
+            from . import xai_subset as xs
+            vi = (None if self.subset_idx is None
+                  else np.asarray(self.subset_idx, int)[:len(cams)])
             np.savez_compressed(
                 self.save_dir / f"gradcam_arrays{sfx}_epoch_{epoch:03d}.npz",
                 cams=by_mode[mode], preds=np.asarray(preds, np.float32), mode=mode,
-                **({} if self.subset_idx is None
-                   else {"val_index": np.asarray(self.subset_idx, int)[:len(cams)]}),
+                **({} if vi is None else {"val_index": vi, **xs.stamp_row_ids(vi)}),
                 **({} if self.subset_fingerprint is None
                    else {"subset_fingerprint": str(self.subset_fingerprint)}))
 
-            # Le metriche vanno nella TABELLA e basta. La figura per-run che c'era qui
-            # (heatmap media, frazione sopra soglia, bar chart delle metriche) e' stata
-            # tolta il 01/08: le prime due non dicono niente e la terza duplica in
-            # pixel una riga di CSV. Su 110 run x 2 modi erano 220 PNG di ingombro.
+            # The metrics go into the TABLE and nowhere else. The per-run figure that used to
+            # be here (mean heatmap, fraction above threshold, bar chart of the metrics) was
+            # removed on 01/08: the first two say nothing and the third duplicates a CSV row in
+            # pixels. Over 110 runs x 2 modes that was 220 PNGs of clutter.
             shape = gradcam_shape_from_cams(by_mode[mode])
             append_epoch_row(self.save_dir / "gradcam_summary.csv",
                              {"epoch_mode": f"{epoch:03d}:{mode}", "epoch": int(epoch),
-                              "mode": mode, "n_cams": int(len(cams)), **shape},
-                             key="epoch_mode")   # <- due righe per epoca: la chiave e' la coppia
+                              "mode": mode, "n_cams": int(len(cams)),
+                              "cam_grid": int(by_mode[mode].shape[1]), **shape},
+                             key="epoch_mode")   # <- two rows per epoch: the key is the pair
 
-        # Il segnale che nasce dall'avere ENTRAMBI: quanto il ramo tabellare sposta
-        # l'attenzione visiva. IoU 1.0 = il tabellare non cambia dove il modello guarda.
+        # The signal that comes from having BOTH: how much the tabular branch moves visual
+        # attention. IoU 1.0 = the tabular branch does not change where the model looks.
         #
-        # ⚠️ LA IoU DA SOLA NON BASTA, ed e' il motivo per cui questa riga usciva quasi
-        # vuota. Su cinque famiglie su sei la testa e' `Dense(1)` su una `Concatenate`,
-        # quindi il logit e' ADDITIVO nei due rami e d(logit)/d(conv_out) non dipende
-        # affatto dalle feature: la heatmap e' identica per costruzione, non per risultato,
-        # e la IoU vale 1.000 ovunque. Intanto la PREDIZIONE cambia fino a 0.53 — cioe' la
-        # riga di confronto diceva «non e' successo niente» proprio mentre l'unica cosa che
-        # si muoveva non era registrata da nessuna parte. Ora la riga porta anche la
-        # differenza sulle heatmap grezze e quella sulle predizioni.
+        # THE IoU ALONE IS NOT ENOUGH, and that is why this row used to come out almost empty.
+        # On five families out of six the head is `Dense(1)` over a `Concatenate`, so the logit
+        # is ADDITIVE in the two branches and d(logit)/d(conv_out) does not depend on the
+        # features at all: the heatmap is identical by construction, not as a result, and the
+        # IoU is 1.000 everywhere. Meanwhile the PREDICTION moves by up to 0.53 — that is, the
+        # comparison row said "nothing happened" exactly while the only thing that moved was
+        # recorded nowhere. The row now carries the difference on the raw heatmaps and the one
+        # on the predictions.
         if self.save_dir and {"image_only", "context"} <= set(by_mode):
             contrast = cam_mode_contrast(by_mode["context"], by_mode["image_only"],
                                          preds_by_mode.get("context"),
@@ -1114,606 +1134,3 @@ class MultiModalGradCAMCallback(Callback):
                               "epoch": int(epoch), "mode": "context_vs_image_only",
                               "n_cams": int(len(by_mode["context"])), **contrast},
                              key="epoch_mode")
-
-
-# --------------------------------------------------------------------------------------
-# LORE (cell 33)
-# --------------------------------------------------------------------------------------
-
-def plot_lore_feature_frequency(
-    freq_all: dict, freq_pos: dict, freq_neg: dict,
-    k: int = 10, epoch_num=None, mode: str = '', figsize=(10, 5), out_path=None,
-):
-    """Barplot of rule-feature frequencies: Global / Pos / Neg predictions."""
-    items = sorted(freq_all.items(), key=lambda kv: kv[1], reverse=True)[:k]
-    if not items:
-        return
-    names = [n for n, _ in items]
-    df = pd.DataFrame({
-        'feature': names,
-        'Global': [freq_all.get(n, 0) for n in names],
-        'Pos preds': [freq_pos.get(n, 0) for n in names],
-        'Neg preds': [freq_neg.get(n, 0) for n in names],
-    })
-    df_melt = df.melt(id_vars='feature', var_name='Class', value_name='Rule frequency')
-    plt.figure(figsize=figsize)
-    ax = sns.barplot(
-        data=df_melt, y='feature', x='Rule frequency', hue='Class',
-        palette=(sns.color_palette('bright')[4], sns.color_palette('bright')[0], sns.color_palette('bright')[3]),
-        edgecolor='black',
-    )
-    for container in ax.containers:
-        ax.bar_label(container, fmt='%d', padding=4, fontsize=7)
-    title = f'LORE Feature Frequency in Rules (top {k})'
-    if mode:
-        title += f' [{mode}]'
-    if epoch_num is not None:
-        title += f' – {epoch_num}'
-    plt.title(title)
-    plt.xlabel('Rule frequency (# instances)')
-    plt.ylabel('')
-    plt.tight_layout()
-    if out_path:
-        plt.savefig(out_path, dpi=300, bbox_inches='tight')
-    plt.close()
-
-
-def save_lore_rules_text(rules: list, epoch_num=None, mode: str = '', out_path=None) -> str:
-    """Write per-instance LORE rules to a .txt file."""
-    header = 'LORE Rules'
-    if mode:
-        header += f' [{mode}]'
-    if epoch_num is not None:
-        header += f' – {epoch_num}'
-    lines = [header, '=' * len(header), '']
-
-    def _fmt(subset, label):
-        lines.append(f'=== {label} ({len(subset)} instances) ===')
-        for i, r in subset:
-            lines.append(f'[inst {i:02d}] pred={r["pred"]:.3f} label={r["label"]}')
-            lines.append(f'  RULE: {r["rule_str"]}')
-            for cr in r.get('crules_str', []):
-                lines.append(f'  COUNTERFACTUAL: {cr}')
-            lines.append('')
-
-    pos = [(i, r) for i, r in enumerate(rules) if r['pred'] >= 0.5]
-    neg = [(i, r) for i, r in enumerate(rules) if r['pred'] < 0.5]
-    _fmt(pos, 'POSITIVE PREDICTIONS')
-    _fmt(neg, 'NEGATIVE PREDICTIONS')
-
-    text = "\n".join(lines)
-    if out_path:
-        with open(out_path, 'w') as f:
-            f.write(text)
-    return text
-
-
-class LoreEngine:
-    """
-    LORE on raw (pre-FeatureSpace) tabular features.
-    Categoricals are label-encoded before LORE, decoded back to strings
-    in the predictor before FeatureSpace.
-    """
-
-    def __init__(
-        self,
-        feature_space,
-        feat_cols: List[str],
-        max_explain_samples: int = 32,
-        positive_threshold: float = 0.5,
-        lore_config: Optional[Dict] = None,
-        lore_random_state: int = 0,
-        oos_samples: int = 1000,
-    ):
-        self.feature_space = feature_space
-        self.feat_cols = feat_cols
-        self.max_explain_samples = int(max_explain_samples)
-        self.positive_threshold = float(positive_threshold)
-        # NOTE: 'random_state' inside lore_config is SILENTLY IGNORED by the xailib wrapper --
-        # LoreTabularExplainer.fit() passes random_state=self.random_state (a class attribute,
-        # default 0) and never reads the config dict. It is set explicitly in _build_explainer.
-        self.lore_random_state = int(lore_random_state)
-        self.oos_samples = int(oos_samples)
-        self.lore_config = lore_config or {
-            'neigh_type': 'random',
-            'size': 300,
-            'verbose': False,
-        }
-        self._image_encoder = None
-        self._head_model = None
-        self._predict_fn = None
-        # Label encoding maps — built per explain() call from actual data
-        self._label_maps = {}   # col → {string: int}
-        self._inv_maps = {}     # col → {int: string}
-        self._cat_cols = []
-
-    # ── Model splitting ──────────────────────────────────────────────────
-    def _build_sub_models(self, model):
-        if self._image_encoder is not None:
-            return
-        # Cut the graph right after the (expensive) image backbone, at the
-        # GlobalAveragePooling2D output. This pooled image feature is the single
-        # trunk through which *all* image-side computation flows, so the head can
-        # rebuild any downstream fusion scheme (plain concat, gamma fusion,
-        # learnable scaling, adaptive gating) from [pooled_image, features].
-        # The backbone stays in image_encoder (run once, cached); the head holds
-        # only the cheap dense/fusion layers, so predicting over the LORE
-        # neighbourhood is fast and works for every architecture.
-        gap_layers = [l for l in model.layers
-                      if isinstance(l, keras.layers.GlobalAveragePooling2D)]
-        if not gap_layers:
-            raise RuntimeError(
-                "LORE: no GlobalAveragePooling2D found in "
-                f"'{model.name}' to split the image branch."
-            )
-        img_emb = gap_layers[0].output            # (None, C) pooled image feature
-        feat_in = model.input["features"]
-        self._image_encoder = keras.Model(
-            inputs=model.input["images"], outputs=img_emb, name="image_encoder",
-        )
-        # Reuse the intermediate pooled tensor directly as a head input (Keras
-        # functional API): architecture-agnostic, no hardcoded layer names.
-        self._head_model = keras.Model(
-            inputs=[img_emb, feat_in], outputs=model.output, name="head_model",
-        )
-        self._predict_fn = tf.function(
-            lambda embs, enc: self._head_model([embs, enc], training=False),
-            reduce_retracing=True,
-        )
-
-    # ── Label encoding ───────────────────────────────────────────────────
-    def _label_encode_df(self, df):
-        """Label-encode categorical columns to integers. Returns encoded copy."""
-        # self._cat_cols = [c for c in df.columns if df[c].dtype == 'object']
-        self._cat_cols = [c for c in df.columns if c != 'target'
-                          and not pd.api.types.is_numeric_dtype(df[c])]
-        self._label_maps, self._inv_maps = {}, {}
-        out = df.copy()
-        for col in self._cat_cols:
-            uniq = sorted(df[col].dropna().unique())
-            lm = {v: i for i, v in enumerate(uniq)}
-            self._label_maps[col] = lm
-            self._inv_maps[col] = {i: v for v, i in lm.items()}
-            out[col] = df[col].map(lm).astype('float64')
-        return out
-
-    # ── Predictor ────────────────────────────────────────────────────────
-    def _make_predictor(self, image_embedding, feat_cols_no_target):
-        head = self._head_model
-        fs = self.feature_space
-        emb_const = tf.constant(image_embedding[np.newaxis], dtype=tf.float32)
-        cat_cols = self._cat_cols
-        inv_maps = self._inv_maps
-        predict_fn = self._predict_fn
-
-        def predict(X) -> np.ndarray:
-            if isinstance(X, pd.DataFrame):
-                df = X.copy()
-                cols = [c for c in df.columns if c != 'target']
-            else:
-                arr = np.asarray(X, dtype=np.float32)
-                if arr.ndim == 1:
-                    arr = arr.reshape(1, -1)
-                df = pd.DataFrame(arr, columns=feat_cols_no_target)
-                cols = feat_cols_no_target
-
-            # Decode label-encoded categoricals back to strings
-            feat_dict = {}
-            for col in cols:
-                if col in cat_cols:
-                    ints = df[col].values.round().astype(int).clip(0, len(inv_maps[col]) - 1)
-                    strings = [inv_maps[col].get(i, inv_maps[col][0]) for i in ints]
-                    feat_dict[col] = tf.constant(strings)
-                else:
-                    feat_dict[col] = tf.constant(df[col].values.astype(np.float32))
-
-            encoded = fs(feat_dict)
-            n = encoded.shape[0]
-            embs = tf.repeat(emb_const, n, axis=0)
-            return predict_fn(embs, encoded).numpy()[:, 0]
-
-        return predict
-
-    # ── LORE wrappers ────────────────────────────────────────────────────
-    def _build_explainer(self, predictor, background_df):
-        # Imported lazily: xailib/lore_explainer is the most fragile dependency in the
-        # stack and is being migrated (see LoreEngineSA), so importing it at module level
-        # would take SHAP and Grad-CAM down with it whenever LORE breaks.
-        from xailib.explainers.lore_explainer import LoreTabularExplainer
-
-        class _BB:
-            def __init__(self, fn, thr):
-                self.fn, self.thr = fn, thr
-            def predict(self, X):
-                return (self.fn(X) >= self.thr).astype(int)
-            def predict_proba(self, X):
-                p = self.fn(X)
-                return np.column_stack([1 - p, p])
-
-        bb = _BB(predictor, self.positive_threshold)
-        df_bg = background_df.copy().reset_index(drop=True)
-        df_bg['target'] = bb.predict(df_bg).astype(np.int64)
-        present = set(df_bg['target'].dropna().astype(int).unique().tolist())
-        missing = [cls for cls in (0, 1) if cls not in present]
-        if missing and len(df_bg) > 0:
-            base_row = df_bg.iloc[0].copy()
-            filler_rows = []
-            for cls in missing:
-                row = base_row.copy()
-                row['target'] = cls
-                filler_rows.append(row)
-            df_bg = pd.concat([df_bg, pd.DataFrame(filler_rows)], ignore_index=True)
-        exp = LoreTabularExplainer(bb=bb)
-        exp.random_state = self.lore_random_state   # FIX: the config key is ignored by the wrapper
-        exp.fit(df_bg, 'target', self.lore_config)
-        self._predictor = predictor                 # kept for the out-of-sample fidelity below
-        return exp
-
-    # def _explain_one(self, lore_exp, x_series):
-    #     try:
-    #         exp = lore_exp.explain(x_series.values)
-    #         rule = exp.getRules()
-    #         crules = exp.getCounterfactualRules()
-    #         premise = rule.get('premise', [])
-    #
-    #         def fmt(p):
-    #             att, op, thr = p['att'], p['op'], float(p['thr'])
-    #             if att in self._cat_cols:
-    #                 idx = int(round(thr))
-    #                 idx = max(0, min(idx, len(self._inv_maps[att]) - 1))
-    #                 label = self._inv_maps[att][idx]
-    #                 readable_op = '=' if op in ('>', '>=') else '≠'
-    #                 return f"{att} {readable_op} '{label}'"
-    #             return f"{att} {op} {thr:.4g}"
-    #
-    #         rule_str = ' AND '.join(fmt(p) for p in premise)
-    #         rule_features = [p['att'] for p in premise]
-    #         crules_str = [
-    #             ' AND '.join(fmt(p) for p in cr.get('premise', []))
-    #             for cr in (crules or [])
-    #         ]
-    #         return {'rule_str': rule_str, 'rule_features': rule_features, 'crules_str': crules_str}
-    #     except Exception as e:
-    #         return {'rule_str': f'[error: {e}]', 'rule_features': [], 'crules_str': []}
-
-    def _explain_one(self, lore_exp, x_series):
-        try:
-            exp = lore_exp.explain(x_series.values)
-            rule = exp.getRules()
-            crules = exp.getCounterfactualRules()
-            premise = rule.get('premise', [])
-
-            def fmt(p):
-                att, op, thr = p['att'], p['op'], float(p['thr'])
-                if att in self._cat_cols:
-                    idx = int(round(thr))
-                    idx = max(0, min(idx, len(self._inv_maps[att]) - 1))
-                    label = self._inv_maps[att][idx]
-                    readable_op = '=' if op in ('>', '>=') else '!='
-                    return f"{att} {readable_op} '{label}'"
-                return f"{att} {op} {thr:.4g}"
-
-            rule_str = ' AND '.join(fmt(p) for p in premise)
-            rule_features = [p['att'] for p in premise]
-            crules_str = [
-                ' AND '.join(fmt(p) for p in cr.get('premise', []))
-                for cr in (crules or [])
-            ]
-            # ---- native fidelity: dt.score(Z, Yb) -- the surrogate scored on the SAME neighbourhood
-            # it was fitted on, i.e. IN-SAMPLE. A decision tree evaluated on its own training data
-            # saturates by construction: this is a second, independent reason for the ~0.97-0.98
-            # ceiling (the first being n=6 explained samples).
-            fid = exp.expDict.get('fidelity')
-
-            # ---- repaired fidelity: redraw a FRESH neighbourhood with the same generator and
-            # score the surrogate out-of-sample, on continuous outputs and balanced classes.
-            oos = {'lore_fidelity_oos_acc': float('nan'), 'lore_fidelity_oos_bacc': float('nan'),
-                   'lore_fidelity_oos_r2': float('nan'), 'neigh_pos_rate': float('nan')}
-            try:
-                from sklearn.metrics import balanced_accuracy_score, r2_score
-                dt = exp.exp.dt                                             # the surrogate tree
-                Z = lore_exp.lore_explainer.neighgen_fn(x_series.values, self.oos_samples)
-                p_model = self._predictor(Z)                                # continuous model prob
-                y_model = (p_model >= self.positive_threshold).astype(int)
-                y_surr = dt.predict(Z)
-                oos['lore_fidelity_oos_acc'] = float((y_surr == y_model).mean())
-                oos['lore_fidelity_oos_r2'] = float(r2_score(p_model, dt.predict_proba(Z)[:, 1]))
-                oos['neigh_pos_rate'] = float(y_model.mean())               # did Z cross the boundary?
-                if len(set(y_model.tolist())) > 1:
-                    oos['lore_fidelity_oos_bacc'] = float(balanced_accuracy_score(y_model, y_surr))
-            except Exception as e:
-                oos['oos_error'] = f'{type(e).__name__}: {e}'
-
-            return {'rule_str': rule_str, 'rule_features': rule_features, 'crules_str': crules_str,
-                    'fidelity': float(fid) if fid is not None else float('nan'),
-                    'rule_len': len(premise), **oos}
-        except Exception as e:
-            return {'rule_str': f'[LORE skipped: {type(e).__name__}: {e}]', 'rule_features': [], 'crules_str': [],
-                    'fidelity': float('nan'), 'rule_len': 0}
-
-    # ── Public API ───────────────────────────────────────────────────────
-    def explain(self, raw_df, images, labels, model, mode='context'):
-        self._build_sub_models(model)
-
-        # Label-encode categoricals → all-numeric for LORE
-        encoded_df = self._label_encode_df(raw_df)
-        feat_cols_no_target = [c for c in encoded_df.columns if c != 'target']
-
-        n = len(encoded_df)
-        ex_idx = np.arange(n)
-        if n > self.max_explain_samples:
-            ex_idx = np.sort(np.random.choice(n, self.max_explain_samples, replace=False))
-
-        ex_df = encoded_df.iloc[ex_idx].reset_index(drop=True)
-        ex_labels = labels[ex_idx].ravel()
-
-        if mode == 'context':
-            img = images.mean(axis=0, keepdims=True).astype(np.float32)
-        elif mode == 'tabular_only':
-            img = np.zeros((1, *images.shape[1:]), dtype=np.float32)
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
-        image_embedding = self._image_encoder(img, training=False).numpy()[0]
-        predictor = self._make_predictor(image_embedding, feat_cols_no_target)
-        preds = predictor(ex_df)
-        lore_exp = self._build_explainer(predictor, encoded_df)
-
-        freq_all, freq_pos, freq_neg = defaultdict(int), defaultdict(int), defaultdict(int)
-        rules = []
-
-        for i in range(len(ex_df)):
-            result = self._explain_one(lore_exp, ex_df.iloc[i])
-            print(f"[LORE {i+1}/{len(ex_df)}] rule_features={result['rule_features']}")
-            result['pred'] = float(preds[i])
-            result['label'] = int(ex_labels[i])
-            rules.append(result)
-            for feat in result['rule_features']:
-                raw_feat = feat.split("=")[0] if "=" in feat else feat
-                freq_all[raw_feat] += 1
-                (freq_pos if preds[i] >= self.positive_threshold else freq_neg)[raw_feat] += 1
-
-        def _agg(key):
-            v = [r[key] for r in rules
-                 if isinstance(r.get(key), float) and not np.isnan(r[key])]
-            return float(np.mean(v)) if v else float('nan')
-
-        def _sem(key):
-            v = [r[key] for r in rules
-                 if isinstance(r.get(key), float) and not np.isnan(r[key])]
-            return float(np.std(v, ddof=1) / np.sqrt(len(v))) if len(v) > 1 else float('nan')
-
-        _lens = [r['rule_len'] for r in rules if r.get('rule_len')]
-        return {
-            'feature_freq_all': dict(freq_all),
-            'feature_freq_pos': dict(freq_pos),
-            'feature_freq_neg': dict(freq_neg),
-            'explained_indices': ex_idx,
-            'n_explained': len(rules),
-            'fidelity': _agg('fidelity'),                       # native, IN-SAMPLE (saturates)
-            'fidelity_sem': _sem('fidelity'),                   # <- with n=6 this did not exist
-            'fidelity_oos_acc': _agg('lore_fidelity_oos_acc'),  # out-of-sample accuracy
-            'fidelity_oos_bacc': _agg('lore_fidelity_oos_bacc'),# balanced (kills class inflation)
-            'fidelity_oos_r2': _agg('lore_fidelity_oos_r2'),    # continuous (kills 0.5-threshold)
-            'fidelity_oos_r2_sem': _sem('lore_fidelity_oos_r2'),
-            'neigh_pos_rate': _agg('neigh_pos_rate'),
-            'rule_len': float(np.mean(_lens)) if _lens else float('nan'),
-        }, rules, preds
-
-
-    from pathlib import Path
-
-
-class LoreCallback(keras.callbacks.Callback):
-    """
-    Runs LoreEngine every N epochs on a frozen validation subset.
-    Operates on RAW features (pre-FeatureSpace) — XAI-Lib handles
-    categorical encoding internally.
-    """
-
-    def __init__(
-        self,
-        data_source: tf.data.Dataset,
-        raw_feature_df: pd.DataFrame,
-        feat_cols: List[str],
-        feature_space,
-        base_dir: str,
-        max_explain_samples: int = 12,
-        positive_threshold: float = 0.5,
-        top_k: int = 10,
-        every_n_epochs: int = 2,
-        max_samples: int = 256,
-        max_batches: Optional[int] = None,
-        lore_config: Optional[Dict] = None,
-        rng_seed: int = 0,
-        modes: tuple = ('context',),
-    ):
-        super().__init__()
-        self.data_source = data_source
-        self.raw_feature_df = raw_feature_df  # pre-FeatureSpace validation DataFrame
-        self.feat_cols = feat_cols
-        self.top_k = int(top_k)
-        self.every_n_epochs = max(1, int(every_n_epochs))
-        self.max_samples = int(max_samples)
-        self.max_batches = max_batches
-        self.rng_seed = int(rng_seed)
-        self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-
-        self._images = None
-        self._raw_df = None
-        self._labels = None
-        self.last_quality = {}   # aggregate LORE quality (fidelity); merged into run diagnostics
-
-        self.modes = tuple(modes)
-        self._engine = LoreEngine(
-            feature_space=feature_space,
-            feat_cols=feat_cols,
-            max_explain_samples=int(max_explain_samples),
-            positive_threshold=float(positive_threshold),
-            lore_config=lore_config,
-        )
-
-    def _freeze_batch(self, ds: tf.data.Dataset):
-        """Collect images and labels from dataset, raw features from DataFrame."""
-        imgs, labels = [], []
-        n = 0
-        for b_idx, (x, y) in enumerate(ds):
-            if self.max_batches and b_idx >= self.max_batches:
-                break
-            remaining = self.max_samples - n
-            if remaining <= 0:
-                break
-            imgs.append(x['images'].numpy()[:remaining])
-            labels.append(y.numpy()[:remaining])
-            n += imgs[-1].shape[0]
-
-        if n == 0:
-            raise RuntimeError('No samples collected for LORE.')
-        self._images = np.concatenate(imgs)
-        self._labels = np.concatenate(labels)
-        # Take corresponding rows from raw DataFrame (same order, no shuffle in val)
-        self._raw_df = self.raw_feature_df.iloc[:n][self.feat_cols].reset_index(drop=True)
-
-    def on_train_begin(self, logs=None):
-        self._freeze_batch(self.data_source)
-
-    def on_epoch_end(self, epoch: int, logs=None):
-        if epoch % self.every_n_epochs != 0 or self._images is None:
-            return
-
-        np.random.seed(self.rng_seed)
-        epoch_name = f'epoch{epoch:03d}'
-        epoch_dir = self.base_dir / epoch_name
-        epoch_dir.mkdir(parents=True, exist_ok=True)
-
-        row = {'epoch': int(epoch)}
-        # 'tabular_only' doubled the cost but never reached the report -- the published
-        # lore_fidelity is the 'context' one. Dropping it pays for max_explain_samples 6 -> 32.
-        for mode in self.modes:
-            mode_dir = epoch_dir / mode
-            mode_dir.mkdir(parents=True, exist_ok=True)
-
-            stats, rules, preds = self._engine.explain(
-                raw_df=self._raw_df,
-                images=self._images,
-                labels=self._labels,
-                model=self.model,
-                mode=mode,
-            )
-
-            self.last_quality[f'lore_fidelity_{mode}'] = stats.get('fidelity')
-            self.last_quality[f'lore_rule_len_{mode}'] = stats.get('rule_len')
-            row[f'lore_fidelity_{mode}'] = stats.get('fidelity')
-
-            plot_lore_feature_frequency(
-                freq_all=stats['feature_freq_all'],
-                freq_pos=stats['feature_freq_pos'],
-                freq_neg=stats['feature_freq_neg'],
-                k=self.top_k,
-                epoch_num=epoch_name,
-                mode=mode,
-                out_path=str(mode_dir / f'lore_feature_freq_top{self.top_k:02d}_{mode}_{epoch_name}.png'),
-            )
-
-            save_lore_rules_text(
-                rules=rules,
-                epoch_num=epoch_name,
-                mode=mode,
-                out_path=str(mode_dir / f'lore_rules_{mode}_{epoch_name}.txt'),
-            )
-
-        # headline quality (context mode) + per-epoch trajectory CSV (one row/epoch when run each epoch)
-        self.last_quality['lore_fidelity'] = self.last_quality.get('lore_fidelity_context')
-        self.last_quality['lore_rule_len'] = self.last_quality.get('lore_rule_len_context')
-        append_epoch_row(self.base_dir / 'lore_fidelity_per_epoch.csv', row)
-
-
-
-# --------------------------------------------------------------------------------------
-# LORE sweep plots (cell 37)
-# --------------------------------------------------------------------------------------
-
-def plot_param_vs_lore_fidelity(df, param_col, title=None, out_dir=None):
-    """LORE fidelity per strategy (mirror of plot_param_vs_best_auc)."""
-    if df.empty or param_col not in df.columns or "lore_fidelity" not in df.columns:
-        return
-    d = df.dropna(subset=["lore_fidelity"]).sort_values(param_col)
-    if d.empty:
-        return
-    plt.figure(figsize=(7, 4))
-    plt.plot(d[param_col], d["lore_fidelity"], marker="o", color="#c44e52")
-    plt.xlabel(param_col); plt.ylabel("lore_fidelity")
-    plt.title(title or f"LORE fidelity vs {param_col}")
-    plt.grid(alpha=0.3)
-    _finalize_plot(out_dir, f"{param_col}_vs_lore_fidelity.png")
-
-
-def plot_lore_fidelity_vs_val_auc(df, param_col=None, title=None, out_dir=None, fname=None):
-    """Scatter (one point per run): x=best_val_auc (performance), y=lore_fidelity (explanation)."""
-    if df.empty or not {"best_val_auc", "lore_fidelity"}.issubset(df.columns):
-        return
-    d = df.dropna(subset=["best_val_auc", "lore_fidelity"])
-    if d.empty:
-        return
-    plt.figure(figsize=(7, 5))
-    if param_col and param_col in d.columns:
-        sc = plt.scatter(d["best_val_auc"], d["lore_fidelity"], c=d[param_col],
-                         cmap="viridis", s=60, edgecolors="black")
-        plt.colorbar(sc, label=param_col)
-        for _, r in d.iterrows():
-            plt.annotate(f"{r[param_col]:.3g}", (r["best_val_auc"], r["lore_fidelity"]),
-                         fontsize=7, xytext=(3, 3), textcoords="offset points")
-    else:
-        plt.scatter(d["best_val_auc"], d["lore_fidelity"], s=60, edgecolors="black")
-    plt.xlabel("best_val_auc (performance)"); plt.ylabel("lore_fidelity (explanation)")
-    plt.title(title or "LORE fidelity vs validation AUC (per strategy)")
-    plt.grid(alpha=0.3)
-    _finalize_plot(out_dir, fname or "lore_fidelity_vs_val_auc.png")
-
-
-def plot_lore_fidelity_vs_val_auc_by_epoch(df, out_dir=None, mode="context"):
-    """Single strategy: aligns per-epoch lore_fidelity (xai/lore/lore_fidelity_per_epoch.csv)
-    with per-epoch val_auc (history.json) and traces the (val_auc, lore_fidelity) trajectory.
-    Meaningful when the LORE callback runs every epoch; with best-epoch-only it shows one point."""
-    if df.empty or "run_dir" not in df.columns:
-        return
-    fcol = f"lore_fidelity_{mode}"
-    for _, r in df.iterrows():
-        run_dir = r.get("run_dir")
-        if not isinstance(run_dir, str):
-            continue
-        fcsv = os.path.join(run_dir, "xai", "lore", "lore_fidelity_per_epoch.csv")
-        hjson = os.path.join(run_dir, "history.json")
-        if not (os.path.exists(fcsv) and os.path.exists(hjson)):
-            continue
-        fdf = pd.read_csv(fcsv)
-        if fcol not in fdf.columns or fdf.empty:
-            continue
-        val_auc = json.load(open(hjson)).get("val_auc", [])
-        ep = fdf["epoch"].astype(int).values
-        keep = (ep >= 0) & (ep < len(val_auc))
-        if not keep.any():
-            continue
-        x = np.asarray(val_auc)[ep[keep]]
-        y = fdf[fcol].values[keep]
-        tag = str(r.get("setting_tag", r.get("run_id", "run")))
-        plt.figure(figsize=(6, 5))
-        plt.plot(x, y, marker="o", color="#4c72b0")
-        for xi, yi, e in zip(x, y, ep[keep]):
-            plt.annotate(f"e{e}", (xi, yi), fontsize=7, xytext=(3, 3), textcoords="offset points")
-        plt.xlabel("val_auc"); plt.ylabel(f"lore_fidelity ({mode})")
-        plt.title(f"LORE fidelity vs val_auc by epoch \u2014 {tag}")
-        plt.grid(alpha=0.3)
-        _finalize_plot(out_dir, f"lore_fid_vs_valauc_by_epoch_{tag}.png")
-
-
-def plot_lore_xai_suite(df, param_col, out_dir=None, by_epoch=True):
-    """One call: per-strategy LORE fidelity, fidelity-vs-val_auc scatter (all strategies),
-    and (optional) per-strategy per-epoch fidelity-vs-val_auc trajectory."""
-    plot_param_vs_lore_fidelity(df, param_col, out_dir=out_dir)
-    plot_lore_fidelity_vs_val_auc(df, param_col, out_dir=out_dir)
-    if by_epoch:
-        plot_lore_fidelity_vs_val_auc_by_epoch(
-            df, out_dir=os.path.join(out_dir, "lore_by_epoch") if out_dir else None)
-

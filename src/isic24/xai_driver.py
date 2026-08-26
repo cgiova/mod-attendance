@@ -19,9 +19,9 @@ import os
 
 import keras
 
+from . import paths as _paths
 from . import xai_faithfulness as xf
 from .xai_engines import (
-    LoreCallback,
     MultiModalGradCAMCallback,
     MultiModalGradCAMEngine,
     ShapCallback,
@@ -30,10 +30,9 @@ from .xai_engines import (
 # --------------------------------------------------------------------------------------
 # The load-bearing kwargs.
 #
-# These are the values `make_xai_callbacks` passed, NOT the engines' constructor defaults
-# (LoreCallback's own defaults are every_n_epochs=2 / max_explain_samples=12).  Every
-# published `lore_fidelity` number was produced with the values below; changing one
-# silently makes the artifacts non-comparable.
+# These are the values `make_xai_callbacks` passes, NOT the engines' constructor defaults.
+# Every published number was produced with the values below; changing one silently makes
+# the artifacts non-comparable.
 # --------------------------------------------------------------------------------------
 SHAP_KWARGS = dict(
     background_size=64, max_explain_samples=128,
@@ -42,86 +41,67 @@ SHAP_KWARGS = dict(
 )
 GRADCAM_KWARGS = dict(use_guided_grads=True, mode="image_only")
 GRADCAM_CB_KWARGS = dict(class_index=0)
-# I DUE MODI di Grad-CAM, girati nello stesso caricamento (2026-08-01).
-#   `image_only`  azzera le feature tabellari -> "dove guarderebbe SENZA il tabellare"
-#   `context`     usa le feature vere         -> "dove guarda davvero"
-# Fino a oggi girava solo `image_only`: con il tabellare spento, cioe' con la fusione
-# disattivata. Per uno studio sull'attendance e' proprio la configurazione che non risponde
-# alla domanda ("il peso della modalita' sposta l'attenzione visiva?"), e la differenza fra
-# i due modi (`cam_iou_modes`) e' essa stessa una misura di quanto il tabellare la sposta.
-# None = un modo solo, quello di GRADCAM_KWARGS (comportamento storico).
+# The TWO Grad-CAM modes, run within the same model load (2026-08-01).
+#   `image_only`  zeroes the tabular features -> "where it would look WITHOUT the table"
+#   `context`     uses the real features      -> "where it actually looks"
+# Until today only `image_only` ran: with the tabular branch off, i.e. with the fusion
+# disabled. For an attendance study that is precisely the configuration that does not answer
+# the question ("does the modality weight move visual attention?"), and the difference
+# between the two modes (`cam_iou_modes`) is itself a measure of how much the table moves it.
+# None = a single mode, the one in GRADCAM_KWARGS (historical behaviour).
 GRADCAM_MODES = ("image_only", "context")
-# Immagini per passo di gradiente. A 144 tutte insieme la GPU esaurisce la memoria: i
-# guided gradients tengono le attivazioni di TUTTA la rete per ogni immagine (misurato il
-# 01/08: ~22 GiB su un tensore (144, 8, 8, 1248), OOM su una GPU da 24 GB). Grad-CAM e' per
-# campione, quindi spezzare il batch da' lo stesso risultato a memoria costante. Alzarlo se
-# la GPU e' libera, abbassarlo se va ancora in OOM.
+# Images per gradient step. With all 144 at once the GPU runs out of memory: guided
+# gradients keep the activations of the WHOLE network for every image (measured 01/08:
+# ~22 GiB on a (144, 8, 8, 1248) tensor, OOM on a 24 GB GPU). Grad-CAM is per sample, so
+# splitting the batch gives the same result at constant memory. Raise it when the GPU is
+# free, lower it if it still OOMs.
 GRADCAM_BATCH = 16
-# max_explain_samples was 6 -- lore_fidelity was the mean over SIX instances (the same 6
-# for all 110 runs), which is why it saturated at ~0.97-0.98 and could not discriminate
-# between strategies.  Raised to 32.  'random_state' is dropped because the xailib wrapper
-# IGNORES it (LoreEngine sets it on the wrapper instead).
-LORE_KWARGS = dict(
-    max_explain_samples=32, positive_threshold=0.5, top_k=10,
-    every_n_epochs=1, max_samples=256, max_batches=2,
-    lore_config={"neigh_type": "random", "size": 300}, rng_seed=0,
-)
-
 # --------------------------------------------------------------------------------------
-# Quale motore LORE costruisce `make_xai_callbacks`.
+# `make_xai_callbacks` builds `LoreSACallback` + `LoreEngineSA` with LORE_SA_KWARGS, and
+# there is no other LORE engine. The one that ran on `xailib` was the default until
+# 2026-07-29 -- its `random` neighbourhood produces explanations of little use, 1.7%
+# opposite-class evidence -- and was removed once the runs it produced had been archived.
+# The two did NOT explain the same function: the old one shared one image embedding across
+# samples (`images.mean(axis=0)`), this one takes one per sample. So the `lore_fidelity`
+# column of the June registry stays an artifact of that path and is never compared row by
+# row with these numbers.
 #
-#   "lore_sa" -> `LoreSACallback` + `LoreEngineSA` con LORE_SA_KWARGS.  **Default dal
-#                2026-07-29**, per decisione di Claudio: il vicinato `random` del legacy
-#                produce spiegazioni poco utili (1.7% di evidenza di classe opposta), quindi
-#                le spiegazioni vanno rigenerate con questo.
-#   "legacy"   -> `LoreCallback` + `LoreEngine` (xailib/lore_explainer).  Resta selezionabile
-#                perche' e' cio' che ha prodotto OGNI `lore_fidelity` in `master_results_*`:
-#                serve per riprodurre quei numeri, non per produrne di nuovi.
-#
-# CONSEGUENZA DA NON PERDERE.  I due motori NON spiegano la stessa funzione -- il legacy usa
-# un embedding immagine condiviso (`images.mean(axis=0)`), `LoreEngineSA` uno per campione --
-# e non usano la stessa metrica riportabile (vedi sotto).  Quindi la colonna `lore_fidelity`
-# dei 110 run resta un artefatto del percorso legacy: va tenuta come storia, non confrontata
-# riga per riga con i numeri nuovi.
-#
-# QUALE NUMERO RIPORTARE.  Non `fidelity`: e' `dt.score(Z, Yb)` in-sample, 1.0 per costruzione
-# su un albero non potato.  Vale sia per il legacy sia per lore_sa.  Riportare:
-#   `fid_cv_bacc`               fedelta' su fold tenuti fuori (l'unica che discrimina)
-#   `lore_sa_coverage`          frazione di campioni con vicinato NON degenere
-#   `neigh_unique_frac`, `neigh_pos_rate`   perche' senza questi la fedelta' non si legge
-# Deletion/insertion non entrano qui: sono la metrica di SHAP-tabellare e Grad-CAM, non di
-# LORE, che e' un surrogato a regole e si misura per accordo col black box.
+# WHICH NUMBER TO REPORT. Not `fidelity`: it is `dt.score(Z, Yb)` in-sample, 1.0 by
+# construction on an unpruned tree. Report:
+#   `fid_cv_bacc`               fidelity on held-out folds (the only discriminating one)
+#   `lore_sa_coverage`          fraction of samples with a NON-degenerate neighbourhood
+#   `neigh_unique_frac`, `neigh_pos_rate`   without which the fidelity cannot be read
+# Deletion/insertion do not belong here: they are the metric of tabular SHAP and Grad-CAM,
+# not of LORE, which is a rule surrogate measured by agreement with the black box.
 # --------------------------------------------------------------------------------------
-LORE_ENGINE = "lore_sa"
 
-# Configurazione scelta il 2026-07-29 misurando su vanilla seed_47 (n=2 campioni):
-# `mutpb=.5` + `init_mutpb=.3` da' 2.9x la diversita' di upstream, le regole piu' lunghe
-# (3.0) e 4x l'evidenza di classe opposta di `mutpb=.8`, a +19% di costo.  Dettagli e
-# tabella completa: `MODALITY_ATTENDANCE.md`, "Scelta del generatore".
+# Configuration chosen 2026-07-29 by measuring on vanilla seed_47 (n=2 samples):
+# `mutpb=.5` + `init_mutpb=.3` gives 2.9x upstream's diversity, the longest rules (3.0) and
+# 4x the opposite-class evidence of `mutpb=.8`, at +19% cost. Details and the full table:
+# `ISIC24_REPORT.md`, LORE generator configuration.
 LORE_SA_KWARGS = dict(
     max_explain_samples=32, every_n_epochs=1, max_samples=256, max_batches=2, rng_seed=0,
     neigh_type="genetic", num_instances=1000, mutpb=0.5, init_mutpb=0.3, threshold=0.5,
 )
 
-# Dove gira LORE. Il suo ciclo caldo e' la TESTA densa (~1000 valutazioni per istanza) piu'
-# l'algoritmo genetico e l'albero, che sono CPU puro; la CNN gira una volta sola per run.
-# Quindi tiene la GPU occupata 23 min/run senza usarla quasi: su una macchina condivisa,
-# 42 ore di GPU ferma.
+# Where LORE runs. Its hot loop is the dense HEAD (~1000 evaluations per instance) plus the
+# genetic algorithm and the tree, which are pure CPU; the CNN runs once per run. So it keeps
+# the GPU busy 23 min/run while barely using it: on a shared machine, 42 hours of idle GPU.
 #
-# `"/CPU:0"` sposta LORE sulla CPU **lasciando la GPU visibile e libera** per gli altri
-# motori: `run_posthoc_xai` passa il device a `load_run_model`, quindi le variabili NASCONO
-# sulla CPU. E' l'unico punto in cui la scelta ha effetto.
+# `"/CPU:0"` moves LORE to the CPU **while leaving the GPU visible and free** for the other
+# engines: `run_posthoc_xai` passes the device to `load_run_model`, so the variables are BORN
+# on the CPU. That is the only point at which the choice takes effect.
 #
-# ⚠️ Il `tf.device` attorno al solo calcolo (quello in `xai_lore_sa.on_epoch_end`) NON basta
-# e da solo fallisce — provato il 02/08, ~20 s per run:
+# ⚠️ A `tf.device` around the computation alone (the one in `xai_lore_sa.on_epoch_end`) is
+# NOT enough and fails on its own — tried 02/08, ~20 s per run:
 #     InvalidArgumentError: Trying to access resource stem_conv/kernel/... located in
 #     device /...GPU:0 from device /...CPU:0
-# perche' `tf.device` non sposta le variabili gia' allocate e la `predict` di Keras 3 e'
-# compilata con XLA, che rifiuta la variabile remota invece di copiarla.
+# because `tf.device` does not move variables already allocated, and Keras 3's `predict` is
+# XLA-compiled, which refuses the remote variable instead of copying it.
 #
-# Costo MISURATO il 02/08 su 6 run: **20,0 min/run su CPU** contro i 22 min su GPU. La CPU
-# non costa niente, e' anzi leggermente piu' veloce — coerente con il fatto che la GPU serviva
-# solo alla CNN. Quindi `"/CPU:0"` e' la scelta giusta per il giro lungo, non un ripiego.
+# Cost MEASURED 02/08 over 6 runs: **20.0 min/run on CPU** against 22 min on GPU. The CPU
+# costs nothing and is in fact slightly faster — consistent with the GPU only ever serving
+# the CNN. So `"/CPU:0"` is the right choice for the long pass, not a fallback.
 LORE_SA_DEVICE = None
 
 ALL_ENGINES = ("shap", "gradcam", "lore")
@@ -142,15 +122,13 @@ def _status_key_for(engine):
     if engine == "gradcam":
         return "MultiModalGradCAMCallback"
     if engine == "lore":
-        # The two LORE engines are different callbacks writing to different subdirs: a run
-        # carrying the legacy result must NOT count as done for `lore_sa`.
-        return "LoreSACallback" if LORE_ENGINE == "lore_sa" else "LoreCallback"
+        return "LoreSACallback"
     return engine
 
 
 # --------------------------------------------------------------------------------------
-# Canonical-artifact write guard  (added 2026-07-29, Claudio: "non voglio assolutamente
-# sovrascrivere le run canoniche che hanno gia' prodotto i loro artefatti")
+# Canonical-artifact write guard  (added 2026-07-29: canonical runs that have already
+# produced their artifacts must never be overwritten)
 #
 # The trap this closes: `run_posthoc_xai` skips only when `xai/xai_status.json` says every
 # engine is "ok" -- and that file is written by THIS driver, so none of the 110 canonical
@@ -171,85 +149,69 @@ def _status_key_for(engine):
 CANONICAL_WRITE_GUARD = True
 
 # Everything each engine's callback writes under `run_dir/xai/`, per engine.
-#
-# I due motori LORE scrivono nella STESSA `xai/lore/` ma in sottocartelle e CSV distinti
-# (`epoch*/context` + `lore_fidelity_per_epoch.csv` contro `epoch*/tabular_sa` +
-# `lore_sa_per_epoch.csv`).  Tenerli separati qui e' quello che permette di aggiungere il
-# motore nuovo a una run che ha gia' quello legacy SENZA `allow_clobber` -- cioe' senza
-# aprire anche la porta a sovrascrivere il legacy nella stessa chiamata.
 def shap_subdir():
-    """`shap` o `shap_tab`, secondo che un campione XAI sia adottato o no.
+    """`shap` or `shap_tab`, according to whether an XAI sample is adopted.
 
-    UN SOLO posto decide dove vive SHAP, perche' tre pezzi devono essere d'accordo: chi
-    scrive (`make_xai_callbacks`), chi protegge (`_CLOBBERABLE`) e chi rilegge
-    (`xai_faithfulness._load_shap_values`). Se divergono, il guard difende una cartella
-    vuota mentre il lettore ne trova un'altra — e gli npz canonici di giugno, che sono sul
-    PREFISSO e senza stampigliatura, tornano a essere gli unici che si trovano.
+    ONE place decides where SHAP lives, because three pieces have to agree: the writer
+    (`make_xai_callbacks`), the protector (`_CLOBBERABLE`) and the reader
+    (`xai_faithfulness._load_shap_values`). Should they diverge, the guard defends an empty
+    folder while the reader finds another one — and June's canonical npz, which are on the
+    PREFIX and unstamped, go back to being the only ones found.
 
-    `xai/shap/`      artefatti canonici, prefisso, mai riscritti
-    `xai/shap_tab/`  tutto cio' che e' calcolato sul campione adottato: array SHAP +
-                     fedelta' con segno. Una cartella, un campione.
+    `xai/shap/`      canonical artifacts, prefix, never rewritten
+    `xai/shap_tab/`  everything computed on the adopted sample: SHAP arrays + signed
+                     faithfulness. One folder, one sample.
     """
     return "shap_tab" if SHAP_KWARGS.get("subset_fingerprint") else "shap"
 
 
 def gradcam_subdir():
-    """`gradcam` o `gradcam_img`, secondo che un campione XAI sia adottato o no.
+    """`gradcam` or `gradcam_img`, according to whether an XAI sample is adopted.
 
-    Stessa logica di `shap_subdir`. `xai/gradcam/` tiene i 106 PNG storici: OTTO immagini
-    prese dalla testa di `validation_ds`, senza array e senza traccia di quali fossero.
-    `xai/gradcam_img/` e' il lato immagine rifatto sul campione a lesioni distinte, con le
-    heatmap GREZZE salvate — che sono la precondizione di qualunque metrica sull'immagine.
+    Same logic as `shap_subdir`. `xai/gradcam/` holds the 106 historical PNGs: EIGHT images
+    taken off the head of `validation_ds`, with no arrays and no trace of which they were.
+    `xai/gradcam_img/` is the image side redone on the distinct-lesion sample, with the RAW
+    heatmaps saved — which are the precondition of any metric on the image.
     """
     return "gradcam_img" if SHAP_KWARGS.get("subset_fingerprint") else "gradcam"
 
 
 _CLOBBERABLE = {
-    # dipende dal campione adottato, come `lore` dipende dal motore: vedi `_patterns_for`
+    # depends on the adopted sample, as `lore` depends on the engine: see `_patterns_for`
     "shap": {"shap":     ("xai/shap/epoch_*", "xai/shap/*.csv"),
              "shap_tab": ("xai/shap_tab/epoch_*", "xai/shap_tab/shap_summary.csv")},
     "gradcam": {"gradcam":     ("xai/gradcam/epoch_*",),
                 "gradcam_img": ("xai/gradcam_img/gradcam_arrays*_epoch_*.npz",
                                 "xai/gradcam_img/gradcam_summary.csv")},
-    "lore": {
-        "legacy":  ("xai/lore/epoch*/context", "xai/lore/epoch*/tabular_only",
-                    "xai/lore/lore_fidelity_per_epoch.csv"),
-        # 2026-08-01: LORE-SA ha una cartella sua, `xai/lore_sa/`. Prima conviveva col
-        # legacy dentro `xai/lore/` e i due si distinguevano per sottocartella
-        # (`tabular_sa` contro `context`+`tabular_only`); ora li separa il livello sopra,
-        # e il guard non deve piu' guardare dentro `xai/lore/` per questo motore.
-        # I `xai/lore/epoch*/tabular_sa/` delle run di giugno-luglio restano dove sono:
-        # sono artefatti storici e nessuna scrittura nuova puo' finirci sopra.
-        "lore_sa": ("xai/lore_sa/epoch*", "xai/lore_sa/lore_sa_per_epoch.csv"),
-    },
-    # Non e' un engine di `make_xai_callbacks`: lo scrive
-    # `xai_faithfulness.aligned_signed_faithfulness`. Sta qui perche' `existing_xai_artifacts`
-    # e' l'unico posto che sa cosa una run ha gia' prodotto, e il loop della fedelta' lo
-    # interroga per la stessa ragione degli altri.
+    # LORE-SA has a folder of its own since 2026-08-01. Whatever the removed engine left
+    # under `xai/lore/` is historical and no new write can land on it.
+    "lore": ("xai/lore_sa/epoch*", "xai/lore_sa/lore_sa_per_epoch.csv"),
+    # Not engines of `make_xai_callbacks`: `xai_faithfulness` writes both. They are here
+    # because `existing_xai_artifacts` is the only place that knows what a run has already
+    # produced, and the faithfulness loop asks it for the same reason the others do.
     "shap_tab": ("xai/shap_tab/faithfulness_aligned_signed_*.json",),
+    "faithfulness": ("xai/faithfulness/*.json", "xai/faithfulness/*_curves.npz"),
 }
 
 
 def _patterns_for(engine):
     pats = _CLOBBERABLE.get(engine, ())
     if isinstance(pats, dict):
-        if engine == "shap":            # dipendono dal campione adottato
+        if engine == "shap":            # they depend on the adopted sample
             return pats.get(shap_subdir(), ())
-        if engine == "gradcam":
-            return pats.get(gradcam_subdir(), ())
-        return pats.get(LORE_ENGINE, ())   # 'lore': dipende da quale motore e' selezionato
+        return pats.get(gradcam_subdir(), ())
     return pats
 
 
 def _is_artifact(path):
-    """Una directory VUOTA non e' un artefatto.
+    """An EMPTY directory is not an artifact.
 
-    I callback creano `epoch<NNN>/<engine>/` prima di calcolare, quindi un run
-    interrotto (Ctrl-C, OOM, kernel morto) lascia una cartella vuota. Contandola come
-    artefatto il write guard bloccava per sempre la ri-esecuzione di una run che non
-    aveva prodotto nulla, e l'unica uscita sarebbe stata `allow_clobber=True` -- cioe'
-    disarmare la protezione proprio dove serve. Trovato il 2026-07-30 su
-    `fixed_scaling/a1p000`, bloccata da una `tabular_sa/` vuota di 30 secondi prima.
+    The callbacks create `epoch<NNN>/<engine>/` before computing, so an interrupted run
+    (Ctrl-C, OOM, dead kernel) leaves an empty folder. Counting it as an artifact, the write
+    guard blocked forever the re-execution of a run that had produced nothing, and the only
+    way out would have been `allow_clobber=True` -- that is, disarming the protection exactly
+    where it is needed. Found on 2026-07-30 on `fixed_scaling/a1p000`, blocked by a
+    `tabular_sa/` emptied 30 seconds earlier.
     """
     return bool(os.listdir(path)) if os.path.isdir(path) else True
 
@@ -272,20 +234,20 @@ def assert_writable(run_dir, engines=ALL_ENGINES, allow_clobber=False):
         busy = sorted(e for e in engines if existing_xai_artifacts(run_dir, (e,)))
         free = sorted(set(engines) - set(busy))
         shown = "\n    ".join(os.path.relpath(h, run_dir) for h in hits[:6])
-        more = f"\n    ... e altri {len(hits) - 6}" if len(hits) > 6 else ""
+        more = f"\n    ... and {len(hits) - 6} more" if len(hits) > 6 else ""
         raise RuntimeError(
-            f"[XAI WRITE GUARD] {run_dir}\n  ha gia' {len(hits)} artefatti su disco per "
+            f"[XAI WRITE GUARD] {run_dir}\n  already holds {len(hits)} artifacts on disk for "
             f"{busy}:\n    {shown}{more}\n"
-            f"  Rieseguire qui li SOVRASCRIVE. Nota che overwrite=False non protegge: salta "
-            f"solo se esiste xai/xai_status.json, che nessuna run canonica ha (le 110 vengono "
-            f"dal vecchio percorso in-training).\n"
-            + (f"  Gli engine {free} qui non hanno artefatti: engines={tuple(free)} li "
-               f"aggiunge senza toccare niente.\n" if free else "")
-            + f"  **overwrite=True NON basta a passare di qui**: dice 'ricalcola', non 'puoi "
-              f"distruggere'. L'unico consenso e' allow_clobber=True (o "
+            f"  Re-running here OVERWRITES them. `overwrite=False` does not protect you: it "
+            f"skips only when xai/xai_status.json exists, which the in-training path never "
+            f"wrote.\n"
+            + (f"  Engines {free} have no artifacts here: engines={tuple(free)} adds them "
+               f"without touching anything.\n" if free else "")
+            + f"  **overwrite=True is NOT enough to pass**: it says 'recompute', not 'you may "
+              f"destroy'. The only consent is allow_clobber=True (or "
               f"xai_driver.CANONICAL_WRITE_GUARD = False).\n"
-              f"  In alternativa copia config.json + checkpoints in una dir temporanea e punta "
-              f"il driver li'.")
+              f"  Otherwise copy config.json + checkpoints into a temporary directory and point "
+              f"the driver there.")
     return hits
 
 
@@ -294,13 +256,13 @@ def assert_writable(run_dir, engines=ALL_ENGINES, allow_clobber=False):
 # --------------------------------------------------------------------------------------
 
 def make_probe_batch(n=8, subset_idx=None):
-    """Le immagini di validation su cui gira Grad-CAM.
+    """The validation images Grad-CAM runs on.
 
-    ``subset_idx`` -- posizioni in ``validation_df``: e' cosi' che Grad-CAM spiega le STESSE
-    lesioni di SHAP e LORE.  Senza, si torna al comportamento storico: le prime ``n`` righe
-    di ``validation_ds`` (costruito con ``shuffle=False``), cioe' **otto** immagini del
-    prefisso.  Otto campioni non bastano per nessuna delle metriche sul lato immagine, ed e'
-    il motivo per cui il lato immagine e' stato rifatto il 2026-08-01.
+    ``subset_idx`` -- positions in ``validation_df``: this is how Grad-CAM explains the SAME
+    lesions as SHAP and LORE.  Without it, the historical behaviour returns: the first ``n``
+    rows of ``validation_ds`` (built with ``shuffle=False``), that is **eight** images of the
+    prefix.  Eight samples are not enough for any of the image-side metrics, and that is why
+    the image side was redone on 2026-08-01.
 
     Used to be a module-level global mutated on first use and cached across every run in
     the study; it is now an explicit argument so a caller can score a different model on
@@ -311,9 +273,9 @@ def make_probe_batch(n=8, subset_idx=None):
         xb, yb = next(iter(ctx.validation_ds))
         return {k: v[:n] for k, v in xb.items()}, yb[:n]
 
-    # Si legge il dataset fino alla posizione piu' alta richiesta e poi si indicizza: e' la
-    # stessa strategia di `LoreSACallback._freeze_batch`, e non assume che il campione sia
-    # un prefisso -- che e' esattamente l'assunzione che ci ha gia' ingannati due volte.
+    # Read the dataset up to the highest position asked for, then index: the same strategy as
+    # `LoreSACallback._freeze_batch`, and it does not assume the sample is a prefix -- which is
+    # exactly the assumption that has already deceived us twice.
     import numpy as _np
     import tensorflow as _tf
     idx = _np.asarray(subset_idx, int)
@@ -337,9 +299,9 @@ def make_xai_callbacks(run_dir, model_name, probe_batch=None, engines=ALL_ENGINE
                        xai_dir=None):
     """Build the SHAP / Grad-CAM / LORE callbacks for one run directory.
 
-    ``xai_dir`` reindirizza TUTTA la scrittura fuori da ``run_dir/xai``: e' cosi' che il
-    campione stratificato produce artefatti senza sfiorare le run canoniche (e senza
-    bisogno di ``allow_clobber``, che disarmerebbe il write guard proprio dove serve).
+    ``xai_dir`` redirects ALL writing away from ``run_dir/xai``: this is how the stratified
+    sample produces artifacts without touching the canonical runs (and without needing
+    ``allow_clobber``, which would disarm the write guard exactly where it is needed).
     """
     ctx = xf._CTX
     xai_dir = xai_dir or os.path.join(run_dir, "xai")
@@ -355,9 +317,9 @@ def make_xai_callbacks(run_dir, model_name, probe_batch=None, engines=ALL_ENGINE
     if "gradcam" in engines:
         d = os.path.join(xai_dir, gradcam_subdir())
         os.makedirs(d, exist_ok=True)
-        # Il probe batch segue il campione adottato: con `subset_idx` Grad-CAM spiega le
-        # STESSE lesioni di SHAP e LORE, e le heatmap diventano riallineabili con le altre
-        # due spiegazioni. Senza, resta il comportamento storico (le prime 8 righe).
+        # The probe batch follows the adopted sample: with `subset_idx` Grad-CAM explains the
+        # SAME lesions as SHAP and LORE, and the heatmaps become realignable with the other two
+        # explanations. Without it, the historical behaviour stands (the first 8 rows).
         _sub = SHAP_KWARGS.get("subset_idx")
         if probe_batch is None:
             probe_batch = make_probe_batch(subset_idx=_sub)
@@ -369,26 +331,14 @@ def make_xai_callbacks(run_dir, model_name, probe_batch=None, engines=ALL_ENGINE
             batch_size=GRADCAM_BATCH,
             tag=f"{model_name}/GradCAM", **GRADCAM_CB_KWARGS))
     if "lore" in engines:
-        # Cartelle DISTINTE per i due motori (2026-08-01): `xai/lore/` resta del legacy,
-        # LORE-SA ha `xai/lore_sa/`. Prima condividevano `xai/lore/` e si separavano solo
-        # una sottocartella piu' in basso, il che rendeva impossibile leggere dal nome della
-        # directory quale motore avesse prodotto cosa.
-        d = os.path.join(xai_dir, "lore" if LORE_ENGINE == "legacy" else "lore_sa")
+        from .xai_lore_sa import _lore_sa_callback_cls
+        d = os.path.join(xai_dir, "lore_sa")
         os.makedirs(d, exist_ok=True)
-        if LORE_ENGINE == "legacy":
-            out.append(LoreCallback(
-                data_source=ctx.validation_ds, raw_feature_df=ctx.validation_df,
-                feat_cols=ctx.feat_cols, feature_space=ctx.feature_space,
-                base_dir=d, **LORE_KWARGS))
-        elif LORE_ENGINE == "lore_sa":
-            from .xai_lore_sa import _lore_sa_callback_cls
-            out.append(_lore_sa_callback_cls()(
-                data_source=ctx.validation_ds, raw_feature_df=ctx.validation_df,
-                feat_cols=ctx.feat_cols, feature_space=ctx.feature_space,
-                to_feature_dict=ctx.to_feature_dict, training_df=ctx.training_df,
-                base_dir=d, **LORE_SA_KWARGS))
-        else:
-            raise ValueError(f"LORE_ENGINE={LORE_ENGINE!r}: attesi 'legacy' o 'lore_sa'")
+        out.append(_lore_sa_callback_cls()(
+            data_source=ctx.validation_ds, raw_feature_df=ctx.validation_df,
+            feat_cols=ctx.feat_cols, feature_space=ctx.feature_space,
+            to_feature_dict=ctx.to_feature_dict, training_df=ctx.training_df,
+            base_dir=d, **LORE_SA_KWARGS))
     return out
 
 
@@ -444,6 +394,90 @@ def run_xai_on_best_epoch(best_model, xai_callbacks, best_epoch, best_val_auc, r
 # Post-hoc entry points
 # --------------------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------------------
+# FeatureSpace binding -- this checkpoint against the space this session encodes with.
+#
+# Nothing here knows a dataset. The identities are read off the artifacts in play: the run
+# records the space it was trained with (`config.json`), the space reports its own width and
+# adapt state, and the session declares the space it loaded. A reference committed to the
+# repository would have to carry a width, and a width belongs to one dataset only.
+# --------------------------------------------------------------------------------------
+def feature_space_fingerprint(fs):
+    """(encoded width, sha256) of a FeatureSpace's ADAPT STATE.
+
+    Feature order, encoded width, categorical vocabularies and every adapt weight. The
+    width alone cannot identify a space: the adapt is not deterministic, so two spaces of
+    equal width and different statistics encode the same row differently.
+    """
+    import hashlib
+
+    import numpy as np
+
+    h = hashlib.sha256()
+    order = list(fs.features.keys())
+    dim = int(fs.get_encoded_features().shape[-1])
+    h.update(("ORDER:" + "|".join(order)).encode())
+    h.update(f"DIM:{dim}".encode())
+    for name in order:                       # vocabularies are order-sensitive
+        pp = fs.preprocessors.get(name)
+        if hasattr(pp, "get_vocabulary"):
+            h.update(f"VOCAB:{name}:".encode())
+            h.update("|".join(map(str, pp.get_vocabulary())).encode())
+    for w in fs.get_weights():               # normalisation statistics
+        w = np.asarray(w)
+        h.update(str(w.shape).encode())
+        h.update(str(w.dtype).encode())
+        h.update(w.tobytes())
+    return dim, h.hexdigest()
+
+
+def _model_feature_dim(model):
+    """The tabular input width of a checkpoint, read off the model."""
+    for t in getattr(model, "inputs", []):
+        if "features" in (getattr(t, "name", "") or "") and len(t.shape) == 2:
+            return int(t.shape[-1])
+    rank2 = [t for t in getattr(model, "inputs", []) if len(t.shape) == 2]
+    if len(rank2) == 1:                      # the image input is rank 4
+        return int(rank2[0].shape[-1])
+    raise RuntimeError(f"could not locate the tabular input of {model.name}")
+
+
+def assert_fs_matches_model(model, fs, run_id=None):
+    """The last resort: the checkpoint's tabular width against the live encoded width."""
+    mdim, fdim = _model_feature_dim(model), int(fs.get_encoded_features().shape[-1])
+    if mdim != fdim:
+        raise RuntimeError(
+            f"[FS GUARD] {run_id or '<run>'}: the checkpoint expects {mdim} encoded features "
+            f"and this FeatureSpace emits {fdim}. It was not trained with this space.")
+    return mdim
+
+
+def assert_run_feature_space(cfg, run_dir, declared_file, declared_fp=None):
+    """Refuse a checkpoint trained against another FeatureSpace, BEFORE loading it.
+
+    Returns the level the check reached -- ``"fingerprint"``, ``"file"`` or ``"width"`` --
+    so a caller can say what was verified instead of implying more than it checked. A run
+    that records no space falls back to the width, which is all its config affords.
+    """
+    run_file = cfg.get("feature_space_file")
+    if run_file is None:
+        return "width"
+    if run_file != declared_file:
+        raise RuntimeError(
+            f"[FS GUARD] {run_dir}\n  was trained against {run_file}, and this session "
+            f"encodes with {declared_file}.\n  Every number the run produces here would be "
+            f"computed on features it has never seen.")
+    run_fp = cfg.get("feature_space_fingerprint")
+    if run_fp is None or declared_fp is None:
+        return "file"
+    if run_fp != declared_fp:
+        raise RuntimeError(
+            f"[FS GUARD] {run_dir}\n  records the same path but another adapt state:\n"
+            f"  run  {run_fp}\n  live {declared_fp}\n  Same width, different statistics: "
+            f"the encoding differs row by row and nothing else would report it.")
+    return "fingerprint"
+
+
 def load_run_model(run_dir, device=None):
     """Reload a run's best checkpoint together with its recorded best epoch.
 
@@ -452,11 +486,11 @@ def load_run_model(run_dir, device=None):
     fixed_scaling / learnable_scaling / controlled_fusion / adaptive_gating checkpoints
     deserialize at all.
 
-    ``device`` (es. ``"/CPU:0"``) e' il device su cui le VARIABILI vengono create. E' la
-    differenza fra far girare un motore sulla CPU e non farlo: un `tf.device` attorno al
-    solo calcolo non sposta pesi gia' allocati sulla GPU, e la `predict` di Keras 3 (XLA)
-    muore invece di copiarli. Attorno al CARICAMENTO, invece, i pesi nascono dove si vuole
-    e da li' in poi tutto il grafo e' coerente. Vedi `LORE_SA_DEVICE`.
+    ``device`` (e.g. ``"/CPU:0"``) is the device the VARIABLES are created on. It is the
+    difference between running an engine on the CPU and not: a `tf.device` around the
+    computation alone does not move weights already allocated on the GPU, and Keras 3's
+    `predict` (XLA) dies instead of copying them. Around the LOADING, weights are born where
+    they are wanted and from there on the whole graph is coherent. See `LORE_SA_DEVICE`.
     """
     ck = sorted(glob.glob(os.path.join(run_dir, "checkpoints", "best_*.keras")))
     if not ck:
@@ -465,10 +499,17 @@ def load_run_model(run_dir, device=None):
     cfg_path = os.path.join(run_dir, "config.json")
     cfg = json.load(open(cfg_path)) if os.path.exists(cfg_path) else {}
 
+    # Before the checkpoint reaches memory: a run paired with another FeatureSpace costs
+    # nothing to refuse here and produces silently wrong numbers if it is loaded.
+    ctx = xf._CTX
+    assert_run_feature_space(cfg, run_dir, ctx.feature_space_file,
+                             ctx.feature_space_fingerprint)
+
     import contextlib
     import tensorflow as tf
     with (tf.device(device) if device else contextlib.nullcontext()):
         model = keras.models.load_model(ck[0], compile=False, safe_mode=False)
+    assert_fs_matches_model(model, ctx.feature_space, cfg.get("run_id", run_dir))
     return model, cfg
 
 
@@ -501,8 +542,8 @@ def run_posthoc_xai(run_dir, engines=ALL_ENGINES, best_epoch=None, best_val_auc=
         best_epoch = model_cfg["best_epoch"] if best_epoch is None else best_epoch
         best_val_auc = model_cfg.get("best_val_auc", 0.0) if best_val_auc is None else best_val_auc
 
-    # Con `xai_dir` esterna non si scrive dentro run_dir: ne' lo status file ne' il write
-    # guard hanno giurisdizione, e la ripresa la fa il chiamante (isic24.xai_subset.is_done).
+    # An external `xai_dir` writes nothing inside run_dir: neither the status file nor the
+    # write guard has jurisdiction there, and resuming is the caller's job (`xai_subset.is_done`).
     external = xai_dir is not None
     status_path = os.path.join(xai_dir or os.path.join(run_dir, "xai"), "xai_status.json")
     if not overwrite and os.path.exists(status_path):
@@ -510,32 +551,32 @@ def run_posthoc_xai(run_dir, engines=ALL_ENGINES, best_epoch=None, best_val_auc=
         # Skip only if EVERY requested engine is recorded ok -- see `_status_key_for`.
         if all(prev.get(_status_key_for(e)) == "ok" for e in engines):
             if verbose:
-                print(f"[skip] {run_dir}: {list(engines)} gia' fatti (overwrite=False)")
+                print(f"[skip] {run_dir}: {list(engines)} already done (overwrite=False)")
             return prev
 
     if dry_run:
         if verbose:
             n = len(existing_xai_artifacts(run_dir, engines))
             blocked = "" if (allow_clobber or not n) else \
-                f" -- MA il write guard lo bloccherebbe: {n} artefatti XAI gia' presenti"
+                f" -- BUT the write guard would block it: {n} XAI artifacts already present"
             print(f"[dry-run] would run {engines} on {run_dir} @ epoch {best_epoch}{blocked}")
         return {e: "dry-run" for e in engines}
 
     if not external:
         assert_writable(run_dir, engines=engines, allow_clobber=allow_clobber)
 
-    # DOVE nascono i pesi. Con `LORE_SA_DEVICE="/CPU:0"` il checkpoint viene caricato con le
-    # variabili sulla CPU, e da li' in poi LORE gira tutto sulla CPU pur avendo la GPU
-    # visibile e libera per gli altri motori. Il `tf.device` attorno al solo `explain`
-    # (`xai_lore_sa`) non basta e non e' un'alternativa: e' l'errore del 02/08.
-    # Vale per LORE DA SOLO: caricare su CPU un modello per SHAP o Grad-CAM li renderebbe
-    # lentissimi in silenzio, quindi la combinazione e' un errore invece che una sorpresa.
+    # WHERE the weights are born. With `LORE_SA_DEVICE="/CPU:0"` the checkpoint is loaded with
+    # its variables on the CPU, and from there on LORE runs entirely on the CPU while the GPU
+    # stays visible and free for the other engines. A `tf.device` around `explain` alone
+    # (`xai_lore_sa`) is not enough and is not an alternative: that was the mistake of 02/08.
+    # It holds for LORE ALONE: loading a model on the CPU for SHAP or Grad-CAM would make them
+    # silently very slow, so the combination is an error rather than a surprise.
     _dev = LORE_SA_DEVICE if "lore" in engines else None
     if _dev and tuple(engines) != ("lore",):
         raise RuntimeError(
-            f"LORE_SA_DEVICE={LORE_SA_DEVICE!r} vale per il modello INTERO: con "
-            f"engines={tuple(engines)} ci finirebbero sopra anche gli altri motori.\n"
-            "  Lanciare LORE da solo (engines=('lore',)), oppure LORE_SA_DEVICE=None.")
+            f"LORE_SA_DEVICE={LORE_SA_DEVICE!r} holds for the WHOLE model: with "
+            f"engines={tuple(engines)} the other engines would land on it too.\n"
+            "  Run LORE on its own (engines=('lore',)), or LORE_SA_DEVICE=None.")
 
     model, cfg = load_run_model(run_dir, device=_dev)
     model_name = (model_cfg or cfg).get("model_name", os.path.basename(run_dir))
@@ -566,8 +607,7 @@ def run_posthoc_xai_batch(art_path, engines=ALL_ENGINES, only_impl=None, max_run
 
     results = {}
     for i, r in master.reset_index(drop=True).iterrows():
-        tail = str(r.run_dir).split("artifacts/enhanced/")[-1]
-        run_dir = os.path.join(art_path, tail)
+        run_dir = _paths.run_dir_abs(r.run_dir, art_path)
         try:
             results[r.run_id] = run_posthoc_xai(
                 run_dir, engines=engines, best_epoch=int(r.best_epoch),

@@ -39,7 +39,7 @@ def build_decoder(with_labels: bool, target_size, num_classes: int):
 
 
 def build_dataset(
-    isic_ids,
+    row_ids,
     hdf5,
     features,
     labels=None,
@@ -62,8 +62,8 @@ def build_dataset(
     AUTO = tf.data.AUTOTUNE
 
     # NOTE: This keeps your current behavior (loads all images into RAM).
-    # Only safe if len(isic_ids) is small or your machine has a lot of RAM.
-    images = [hdf5[i][()] for i in isic_ids]
+    # Only safe if len(row_ids) is small or your machine has a lot of RAM.
+    images = [hdf5[i][()] for i in row_ids]
 
     inp = {"images": images, "features": features}
     slices = (inp, labels) if labels is not None else inp

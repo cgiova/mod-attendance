@@ -145,34 +145,34 @@ class GateEntropyLoss(keras.layers.Layer):
 
 
 def assert_loss_is_per_sample(model, impl_name=""):
-    """Solleva se la loss compilata annullerebbe `class_weight`.
+    """Raise if the compiled loss would cancel `class_weight`.
 
-    `class_weight` diventa `sample_weight`, e Keras lo applica al valore **restituito** dalla
-    loss. Se la loss riduce gia' a scalare, la pesatura degenera in un fattore moltiplicativo
-    unico e non distingue piu' le classi — in silenzio, senza nessun errore.
+    `class_weight` becomes `sample_weight`, and Keras applies it to the value the loss
+    **returns**. A loss that already reduces to a scalar turns the weighting into a single
+    multiplicative factor that no longer separates the classes — silently, with no error.
 
-    Non e' teorico (audit 2026-08-04): `build_loss_regularized` con ``reg_mode='per_batch'`` fa
-    ``tf.reduce_mean`` dentro la loss, e le 25 run canoniche di `loss_regularization` hanno
-    addestrato NON pesate mentre le altre cinque famiglie lo erano. Misurato:
-    ``cos(direzione con class_weight, direzione senza)`` = **1.000000**.
+    Not theoretical (audit 2026-08-04): `build_loss_regularized` with ``reg_mode='per_batch'``
+    calls ``tf.reduce_mean`` inside the loss, and the 25 canonical `loss_regularization` runs
+    trained UNWEIGHTED while the other five families were weighted. Measured:
+    ``cos(update with class_weight, update without)`` = **1.000000**.
 
-    Le ``keras.losses.Loss`` sono esenti: applicano `sample_weight` PRIMA della riduzione.
+    ``keras.losses.Loss`` objects are exempt: they apply `sample_weight` BEFORE reducing.
 
-    Test: sezione 12 di ``scripts/xai_2026-07-28/test_guards.py``.
+    Test: section 12 of ``scripts/xai_2026-07-28/test_guards.py``.
     """
     fn = getattr(model, "loss", None)
     if fn is None or isinstance(fn, keras.losses.Loss) or not callable(fn):
         return
     try:
         out = fn(tf.zeros((8, 1)), tf.fill((8, 1), 0.5))
-    except Exception:                  # loss non richiamabile a mano: non si blocca il run
+    except Exception:                  # loss not callable by hand: do not block the run
         return
     if len(getattr(out, "shape", ())) == 0:
         raise ValueError(
-            f"[CLASS WEIGHT GUARD] {impl_name or getattr(model, 'name', '?')}: la loss compilata "
-            f"restituisce uno SCALARE, quindi `class_weight` non pesa le classi ma scala "
-            f"l'intera loss di un fattore unico. Togliere la riduzione dalla loss (restituire un "
-            f"valore per campione), oppure mettere USE_CLASS_WEIGHT = False e dichiararlo.")
+            f"[CLASS WEIGHT GUARD] {impl_name or getattr(model, 'name', '?')}: the compiled loss "
+            f"returns a SCALAR, so `class_weight` does not weight the classes but scales the "
+            f"whole loss by a single factor. Either drop the reduction from the loss (return one "
+            f"value per sample), or set USE_CLASS_WEIGHT = False and declare it.")
 
 
 def weighted_loss_ps(y_true, y_pred):
@@ -185,9 +185,9 @@ def weighted_loss_ps(y_true, y_pred):
     # BCE base
     base_loss = keras.losses.binary_crossentropy(y_true, y_pred, label_smoothing=0.02)
 
-    # Penalità sui pesi che connettono la parte tabellare all’output
-    W = dense_final.kernel  # matrice [dim_img + dim_tab, 1]
-    W_tab = W[dim_img:]     # seleziona solo la parte tabellare
+    # Penalty on the weights connecting the tabular part to the output
+    W = dense_final.kernel  # matrix [dim_img + dim_tab, 1]
+    W_tab = W[dim_img:]     # the tabular part only
     reg_term = lambda_reg * tf.reduce_sum(tf.square(W_tab))
 
     return base_loss + reg_term

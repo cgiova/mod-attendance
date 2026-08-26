@@ -26,7 +26,7 @@ data/
 *.csv
 *.zip
 
-# artifacts — ci vivono anche i report: MODALITY_ATTENDANCE.md NON viaggia nei commit
+# artifacts — ci vivono anche i report (`<DATASET>_STATUS.md`, `<DATASET>_REPORT.md`): NON viaggiano nei commit
 models/
 runs/
 outputs/
@@ -50,3 +50,8 @@ Thumbs.db
 # one-off locali
 /notebooks/modality_attendance/feature_space_guard.py
 /src/isic24/colab_bootstrap.sh
+/.claude/
+/ISIC24_STATIC_AUDIT.md
+.vscode/settings.json
+notebooks/modality_attendance/mod-attendance.code-workspace
+ISIC24_STATIC_AUDIT.md
