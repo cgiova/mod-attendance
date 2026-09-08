@@ -1,6 +1,9 @@
 import tensorflow as tf
 import keras_cv
 
+# An image store declares its own encoding; the ones written before it did hold JPEG bytes.
+_DECODERS = {"jpeg_bytes": tf.io.decode_jpeg, "png_bytes": tf.io.decode_png}
+
 
 def build_augmenter():
     aug_layers = [
@@ -19,9 +22,11 @@ def build_augmenter():
     return augment
 
 
-def build_decoder(with_labels: bool, target_size, num_classes: int):
+def build_decoder(hdf5, with_labels: bool, target_size, num_classes: int):
+    decode = _DECODERS[hdf5.attrs.get("format", "jpeg_bytes")]
+
     def decode_image(inp):
-        image = tf.io.decode_jpeg(inp["images"])
+        image = decode(inp["images"], channels=3)
         image = tf.image.resize(image, size=target_size, method="area")
         image = tf.cast(image, tf.float32) / 255.0
         inp["images"] = tf.reshape(image, [*target_size, 3])
@@ -55,7 +60,8 @@ def build_dataset(
     drop_remainder=False,
 ):
     if decode_fn is None:
-        decode_fn = build_decoder(with_labels=(labels is not None), target_size=image_size, num_classes=num_classes)
+        decode_fn = build_decoder(hdf5, with_labels=(labels is not None), target_size=image_size,
+                                  num_classes=num_classes)
     if augment_fn is None:
         augment_fn = build_augmenter()
 
