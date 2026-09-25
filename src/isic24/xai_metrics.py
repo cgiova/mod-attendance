@@ -196,8 +196,10 @@ def lore_shape_from_df(d, d_raw=None):
     if d is None or not len(d):
         return None
     rl = d["rule_len"].astype(float)
+    covered = d["neigh_n_classes"].astype(float) >= 2 if "neigh_n_classes" in d else rl >= 1
     n_raw = int(d_raw) if d_raw else int(max(rl.max(), 2))
-    rec = {"n_lore": int(len(d)), "lore_rule_len": float(rl.mean()),
+    rec = {"n_lore": int(len(d)),
+           "lore_rule_len": float(rl[covered].mean()) if covered.any() else np.nan,
            "frac_empty_rules": float((rl < 1).mean()),
            "lore_pos_rate": float(d["true_label"].mean()) if "true_label" in d else np.nan,
            # The sample's IDENTITY, not just its size. `n` is not enough: on 01/08
@@ -210,7 +212,7 @@ def lore_shape_from_df(d, d_raw=None):
                                if "val_index" in d.columns else
                                f"n{len(d)}-p{float(d['true_label'].mean()):.3f}"
                                if "true_label" in d.columns else f"n{len(d)}")}
-    live = rl >= 1
+    live = covered & (rl >= 1)
     if not live.any():
         rec.update(lore_rule_compactness=np.nan, branch_off_lore=True)
         return rec
@@ -333,11 +335,12 @@ def shap_lore_agreement(run_dir, encoded_feature_names, k=TOP_K, lore_idx=None,
                                   if A_sets else np.nan)
     rec["agreement_n_used"] = len(A_sets)
     if A_sets:
-        rec.update(_agreement_null(A_sets, B_sets, sorted(g), n_perm=n_perm, seed=seed))
+        rec.update(_agreement_null(A_sets, B_sets, sorted(g), n_perm=n_perm, seed=seed, k=k))
     return rec
 
 
-def _agreement_null(A_sets, B_sets, raw_features, n_perm=N_PERM_AGREEMENT, seed=0):
+def _agreement_null(A_sets, B_sets, raw_features, n_perm=N_PERM_AGREEMENT, seed=0,
+                    k=TOP_K):
     """The null of the SHAP<->LORE agreement, on TWO scales. Without it the number is unreadable.
 
     A Jaccard between a top-k and a rule set grows **mechanically** with rule length, and
@@ -379,8 +382,8 @@ def _agreement_null(A_sets, B_sets, raw_features, n_perm=N_PERM_AGREEMENT, seed=
         out["agreement_rho_global"] = float(stats.spearmanr(fa, fb)[0])
         gn = [stats.spearmanr(fa, rng.permutation(fb))[0] for _ in range(max(n_perm // 4, 10))]
         out["agreement_rho_global_null"] = float(np.median(gn))
-        ta = {raw_features[i] for i in np.argsort(-fa)[:TOP_K]}
-        tb = {raw_features[i] for i in np.argsort(-fb)[:TOP_K]}
+        ta = {raw_features[i] for i in np.argsort(-fa)[:k]}
+        tb = {raw_features[i] for i in np.argsort(-fb)[:k]}
         out["agreement_top_global_jaccard"] = len(ta & tb) / max(len(ta | tb), 1)
     return out
 
@@ -592,7 +595,8 @@ def collect(master, art_path, encoded_feature_names=None, k=TOP_K, d_raw=None,
     for _, r in master.iterrows():
         rd = _paths.run_dir_abs(r.run_dir, art_path)
         rec = dict(impl_name=r.impl_name, setting_tag=r.setting_tag, seed=r.seed,
-                   run_id=r.run_id, param=setting_value(r.impl_name, r.setting_tag))
+                   run_id=r.run_id, param=setting_value(r.impl_name, r.setting_tag),
+                   shape_top_k=k)
         for f in (shap_shape_metrics(rd, encoded_feature_names, k),
                   lore_shape_metrics(rd, d_raw)):
             if f:
@@ -606,7 +610,7 @@ def collect(master, art_path, encoded_feature_names=None, k=TOP_K, d_raw=None,
 
 
 def summary_by_family(art_path, shape_df=None, stab_df=None, central=None, out_dir=None,
-                      verbose=True):
+                      verbose=True, faith_df=None, lore_df=None):
     """The SINGLE per-family table: faithfulness + attendance + shape, side by side.
 
     The column order is the thesis: the PRIMARY metrics first (faithfulness, attendance),
@@ -617,9 +621,8 @@ def summary_by_family(art_path, shape_df=None, stab_df=None, central=None, out_d
     out_dir = out_dir or os.path.join(art_path, "runs", xs.AGGREGATE_DIRNAME)
     parts = []
 
-    f = os.path.join(out_dir, "faithfulness_aligned_signed_n144.csv")
-    if os.path.exists(f):
-        d = xs.drop_ablations(pd.read_csv(f), "faithfulness", verbose)
+    if faith_df is not None and len(faith_df):
+        d = xs.drop_ablations(faith_df, "faithfulness", verbose)
         if central:
             d = d[[central.get(i) == t for i, t in zip(d.impl_name, d.setting_tag)]]
         parts.append(d.groupby("impl_name").agg(
@@ -627,9 +630,8 @@ def summary_by_family(art_path, shape_df=None, stab_df=None, central=None, out_d
             faith_target_q20=("target_del_q20norm", "mean"),
             faith_posev_q20=("posev_del_q20norm", "mean")))
 
-    l = os.path.join(out_dir, "lore_sa_quality_n48.csv")
-    if os.path.exists(l):
-        d = xs.drop_ablations(pd.read_csv(l), "lore", verbose)
+    if lore_df is not None and len(lore_df):
+        d = xs.drop_ablations(lore_df, "lore", verbose)
         if central:
             d = d[[central.get(i) == t for i, t in zip(d.impl_name, d.setting_tag)]]
         parts.append(d.groupby("impl_name").agg(

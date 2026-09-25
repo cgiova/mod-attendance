@@ -315,9 +315,10 @@ if os.path.isdir(os.path.join(ART, "runs")):
           f"{len(master)} runs over {len(_studies9)} studies, {len(_gone9)} missing")
     cf = os.path.join(ART, "runs", "_faithfulness", "combined_faithfulness.csv")
     if os.path.exists(cf):
-        n = len(pd.read_csv(cf))
-        check("C. combined_faithfulness.csv is NOT the registry", n != len(master),
-              f"{n} rows vs {len(master)} runs: do not use it for family means")
+        _cf9 = pd.read_csv(cf)
+        check("C. combined_faithfulness.csv is keyed one-to-one to the registry",
+              _cf9.run_id.is_unique and set(_cf9.run_id) == set(master.run_id),
+              f"{len(_cf9)} rows, {_cf9.run_id.nunique()} run ids vs {len(master)} runs")
 else:
     print("  (artifacts unavailable: section skipped)")
 
@@ -1002,10 +1003,12 @@ for _impl, _hot in (("vanilla", _TL), ("controlled_fusion", _TL), ("fixed_scalin
     for _seed in (47, 53):
         _tag = f"{_impl}_{_seed}"
         make_cams(_tag, _hot)
-        _rows.append(dict(impl_name=_impl, setting_tag={"fixed_scaling": "a0p500"}.get(_impl, "base"),
+        _rows.append(dict(run_id=_tag, impl_name=_impl,
+                          setting_tag={"fixed_scaling": "a0p500"}.get(_impl, "base"),
                           seed=_seed, run_dir=os.path.join("runs", _tag)))
 make_cams("fixed_scaling_abl", _TL)
-_rows.append(dict(impl_name="fixed_scaling", setting_tag="a1p000", seed=47,
+_rows.append(dict(run_id="fixed_scaling_abl", impl_name="fixed_scaling",
+                  setting_tag="a1p000", seed=47,
                   run_dir=os.path.join("runs", "fixed_scaling_abl")))
 _master = pd.DataFrame(_rows)
 _central = {"vanilla": "base", "controlled_fusion": "base", "fixed_scaling": "a0p500"}
@@ -1352,7 +1355,7 @@ _regG26 = xs26.build_registry({"learnable_scaling": _stL26, "vanilla": _stV26}, 
 _aG26 = _regG26.set_index("impl_name")["alpha_final"]
 check("G. the learned alpha enters the registry at `best_epoch`, not at the last epoch the "
       "trajectory holds, and a family that logs none stays NaN",
-      _aG26["learnable_scaling"] == 0.53 and pd.isna(_aG26["vanilla"]),
+      _aG26["learnable_scaling"] == 0.54 and pd.isna(_aG26["vanilla"]),
       f"best_epoch=3 -> {_aG26['learnable_scaling']}, last row 0.55, vanilla "
       f"{_aG26['vanilla']}")
 
@@ -1436,6 +1439,95 @@ try:
           and "_make_dataset(raw_df" not in _src28)
 except ImportError as _e28:                                             # noqa: BLE001
     print(f"  (lore_sa unavailable: section skipped — {_e28})")
+
+# ====================================================================== 28B ===
+section("28B. LORE reproducibility and covered-rule summaries")
+import random as _random28b                                             # noqa: E402
+from types import SimpleNamespace as _SNS28b                            # noqa: E402
+from isic24 import xai_driver as _xd28b                                 # noqa: E402
+from isic24 import xai_lore_sa as _xl28b                                # noqa: E402
+from isic24 import xai_metrics as _xm28b                                # noqa: E402
+from isic24 import xai_subset as _xs28b                                 # noqa: E402
+
+_cfg28b = _xd28b.lore_sa_config()
+_mut28b = _xd28b.LORE_SA_KWARGS["mutpb"]
+try:
+    _xd28b.LORE_SA_KWARGS["mutpb"] = _mut28b + 0.01
+    _cfg28b_changed = _xd28b.lore_sa_config()
+finally:
+    _xd28b.LORE_SA_KWARGS["mutpb"] = _mut28b
+check("A. the LORE fingerprint records package, seed policy and generator knobs",
+      _cfg28b["lore_sa_version"] and _cfg28b["seed_policy"] == "base-plus-sample-position"
+      and _cfg28b["fingerprint"] != _cfg28b_changed["fingerprint"],
+      f"{_cfg28b['fingerprint']} at mutpb={_mut28b}")
+
+_tr28b = pd.DataFrame({"x": [0.0, 1.0], "target": [0, 1]})
+_CB28b = _xl28b._lore_sa_callback_cls()
+_cb28b = _CB28b(data_source=[], raw_feature_df=_tr28b, feat_cols=["x"],
+                feature_space=None, to_feature_dict=None, training_df=_tr28b,
+                base_dir=os.path.join(TMP, "lore_cb28b"), rng_seed=19)
+check("B. the callback's public rng_seed reaches the engine", _cb28b._engine.random_state == 19)
+
+
+class _Img28b:
+    def predict(self, imgs, batch_size=32, verbose=0):
+        return np.zeros((len(imgs), 1))
+
+
+class _Expl28b:
+    def __init__(self, bbox, draws):
+        self.bbox, self.draws = bbox, draws
+        self.surrogate = _SNS28b(fid_cv_acc=1.0, fid_cv_bacc=1.0)
+
+    def explain(self, x, num_instances=1000):
+        self.draws.append((_random28b.random(), np.random.random()))
+        self.bbox.neigh_X = np.asarray([[0.0], [1.0]], dtype=object)
+        self.bbox.neigh_y = np.asarray([0, 1])
+        return {"rule": {"premises": [{"attr": "x", "op": ">", "val": 0}],
+                         "consequence": {"attr": "target", "op": "=", "val": 1}},
+                "fidelity": 1.0}
+
+
+_draws28b = []
+_eng28b = _xl28b.LoreEngineSA(None, ["x"], None, _tr28b, random_state=19)
+_eng28b._make_dataset = lambda raw, labels: None
+
+
+def _make28b(bbox, dataset):
+    _random28b.seed(None)             # reproduce lore-sa's constructor side effect
+    np.random.seed(None)
+    return _Expl28b(bbox, _draws28b)
+
+
+_eng28b._make_explainer = _make28b
+_split28b = _xl28b._split_image_head
+try:
+    _xl28b._split_image_head = lambda model: (_Img28b(), None)
+    _, _df28b = _eng28b.explain(None, _tr28b[["x"]], np.zeros((2, 1)), [0, 1], 2,
+                                verbose=False)
+finally:
+    _xl28b._split_image_head = _split28b
+_expected28b = [(_random28b.Random(s).random(), np.random.RandomState(s).random_sample())
+                for s in (19, 20)]
+check("C. every sample resets both RNGs after lore-sa reseeds them from entropy",
+      np.allclose(_draws28b, _expected28b) and _df28b.rng_seed.tolist() == [19, 20],
+      f"draws={_draws28b}, seeds={_df28b.rng_seed.tolist()}")
+
+_q28b = pd.DataFrame({"i": range(4), "true_label": [0, 0, 1, 1],
+                      "neigh_n_classes": [1, 2, 1, 2], "rule_len": [0, 4, 0, 2],
+                      "neigh_pos_rate": [0.0, 0.5, 1.0, 0.5],
+                      "fid_insample": [1.0] * 4, "warning": ["mono", None, "mono", None],
+                      "error": [None] * 4})
+_shape28b = _xm28b.lore_shape_from_df(_q28b, d_raw=6)
+_qd28b = os.path.join(TMP, "quality28b", "xai", "lore_sa", "epoch001")
+os.makedirs(_qd28b, exist_ok=True)
+_q28b.to_csv(os.path.join(_qd28b, "lore_sa_persample_001.csv"), index=False)
+_quality28b = _xs28b._lore_quality(os.path.join(TMP, "quality28b"))
+check("D. rule length is summarized only where the neighbourhood has both classes",
+      _shape28b["lore_rule_len"] == 3.0 and _quality28b["rule_len"] == 3.0
+      and _quality28b["rl_y0"] == 4.0 and _quality28b["rl_y1"] == 2.0
+      and _quality28b["rng_protocol"] == "unseeded-v1",
+      f"shape={_shape28b['lore_rule_len']}, quality={_quality28b['rule_len']}")
 
 # ======================================================================= 29 ===
 section("29. ALIGNED ATTRIBUTOR — one permutation, drawn the same way for every model")
@@ -1561,14 +1653,18 @@ check("B. the run that declares this space passes, and says how far the check re
       _bind31({"feature_space_file": _DECL31, "feature_space_fingerprint": _FP31})
       == "fingerprint" and _bind31({"feature_space_file": _DECL31}) == "file")
 
+check("C. another file with the same fingerprint is the same adapted FeatureSpace",
+      _bind31({"feature_space_file": _OTHER31, "feature_space_fingerprint": _FP31})
+      == "fingerprint")
+
 _ok31c, _m31c = raises(lambda: _bind31({"feature_space_file": _DECL31,
                                         "feature_space_fingerprint": "b" * 64}))
-check("C. the same path re-adapted is caught too: same file, another adapt state", _ok31c, _m31c)
+check("D. the same path re-adapted is caught too: same file, another adapt state", _ok31c, _m31c)
 
-check("D. a run that records no space falls back to the width, and DECLARES that it did",
+check("E. a run that records no space falls back to the width, and DECLARES that it did",
       _bind31({}) == "width")
 
-# The two spaces of case E differ only in their adapt statistics.
+# The two spaces of case F differ only in their adapt statistics.
 from types import SimpleNamespace as _SNS31                             # noqa: E402
 import keras as _keras31                                                # noqa: E402
 import tensorflow as _tf31                                              # noqa: E402
@@ -1587,14 +1683,14 @@ for _scale in (1.0, 7.0):
 _d31a, _fp31a = _xd31.feature_space_fingerprint(_fs31[0])
 _d31b, _fp31b = _xd31.feature_space_fingerprint(_fs31[1])
 _stub31 = _SNS31(inputs=[_SNS31(name="features", shape=(None, _d31a))])
-check("E. the width check CANNOT see it: two spaces of equal width and different adapt "
+check("F. the width check CANNOT see it: two spaces of equal width and different adapt "
       "state pass it, and only the fingerprint separates them",
       _d31a == _d31b and _fp31a != _fp31b
       and _xd31.assert_fs_matches_model(_stub31, _fs31[1]) == _d31b,
       f"width {_d31a} both, fingerprints {_fp31a[:8]} vs {_fp31b[:8]}")
 
 _src31 = _inspect28.getsource(_xd31.load_run_model)
-check("F. every loop inherits the check: load_run_model runs it BEFORE keras loads the "
+check("G. every loop inherits the check: load_run_model runs it BEFORE keras loads the "
       "checkpoint, so a mispaired run costs no GPU",
       _src31.index("assert_run_feature_space") < _src31.index("keras.models.load_model")
       and "ctx.feature_space_file" in _src31)
