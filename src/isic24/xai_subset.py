@@ -803,11 +803,14 @@ def _lore_quality(run_dir):
         return None
     d = pd.read_csv(hits[-1])
     d["covf"] = (d.neigh_n_classes > 1).astype(float)
-    g = d.groupby("true_label").agg(c=("covf", "mean"), r=("rule_len", "mean"))
+    d["rule_len_covered"] = d["rule_len"].where(d["covf"].astype(bool))
+    g = d.groupby("true_label").agg(c=("covf", "mean"), r=("rule_len_covered", "mean"))
     return dict(n=len(d), pos_rate=float(d.true_label.mean()),
                 n_pos=int(d.true_label.sum()), n_neg=int((1 - d.true_label).sum()),
+                rng_protocol="seeded-v2" if "rng_seed" in d else "unseeded-v1",
                 lore_coverage=d["covf"].mean(), lore_coverage_5050=g["c"].mean(),
-                rule_len=d["rule_len"].mean(), rule_len_5050=g["r"].mean(),
+                rule_len=d["rule_len_covered"].mean(),
+                rule_len_5050=g["r"].reindex([0, 1]).mean(skipna=False),
                 cov_y0=g["c"].get(0, np.nan), cov_y1=g["c"].get(1, np.nan),
                 rl_y0=g["r"].get(0, np.nan), rl_y1=g["r"].get(1, np.nan),
                 neigh_pos_rate=d["neigh_pos_rate"].mean(),
@@ -817,7 +820,7 @@ def _lore_quality(run_dir):
 
 def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag="",
            out_dir=None, verbose=True, encoded_feature_names=None, lore_idx=None,
-           shape_metrics=True):
+           shape_metrics=True, shape_top_k=None):
     """Between-family tables and figures, from the artifacts already on disk. Zero GPU.
 
     `master`  the `master_results_rows.csv` DataFrame (columns impl_name, setting_tag,
@@ -829,10 +832,20 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
     `tag`     forces the file suffix. Default: derived from each kind's own `n` (`_n144` for
               faithfulness, `_n48` for LORE), so the two cannot label themselves with the
               other's n.
+    `shape_top_k` selects raw features for stability and agreement; defaults to TOP_K.
+    `kinds=()` still reads per-run faithfulness and LORE for the shape-family summary.
     """
     import pandas as pd
     import matplotlib.pyplot as plt
     from .xai_engines import _finalize_plot
+
+    do_shape = shape_metrics and encoded_feature_names is not None
+    if do_shape:
+        from . import xai_metrics as xmet
+        shape_top_k = xmet.TOP_K if shape_top_k is None else shape_top_k
+        n_raw = len(xmet.raw_groups(encoded_feature_names))
+        if not isinstance(shape_top_k, (int, np.integer)) or not 1 <= shape_top_k < n_raw:
+            raise ValueError(f"shape_top_k must be an integer in [1, {n_raw}); got {shape_top_k}.")
 
     out_dir = out_dir or os.path.join(art_path, "runs", AGGREGATE_DIRNAME)
     os.makedirs(out_dir, exist_ok=True)
@@ -853,7 +866,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
     rd = {r.run_id: run_dir_abs(r.run_dir, art_path) for _, r in master.iterrows()}
     written, out = [], {}
 
-    if "shap_tab" in kinds:
+    if "shap_tab" in kinds or do_shape:
         rows = []
         for _, r in master.iterrows():
             rec = _run_gains(rd[r.run_id])
@@ -862,7 +875,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
                                  seed=r.seed, run_id=r.run_id, **rec))
         faith = pd.DataFrame(rows)
         out["faith"] = faith
-        if len(faith):
+        if "shap_tab" in kinds and len(faith):
             sfx = _sfx(faith)
             p = os.path.join(out_dir, f"faithfulness_aligned_signed{sfx}.csv")
             stamp_aggregate(p, faith.run_id, aggregate="faithfulness_aligned_signed",
@@ -902,7 +915,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
             _finalize_plot(out_dir, f"faithfulness_by_family{sfx}.png")
             written.append(os.path.join(out_dir, f"faithfulness_by_family{sfx}.png"))
 
-    if "lore_sa" in kinds:
+    if "lore_sa" in kinds or do_shape:
         rows = []
         for _, r in master.iterrows():
             rec = _lore_quality(rd[r.run_id])
@@ -920,7 +933,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
                           f"(pos_rate {sorted(_g.pos_rate.round(3).unique())}) — "
                           f"the family mean blends populations, redo the old ones")
         out["lore"] = lore
-        if len(lore):
+        if "lore_sa" in kinds and len(lore):
             sfx = _sfx(lore)
             p = os.path.join(out_dir, f"lore_sa_quality{sfx}.csv")
             stamp_aggregate(p, lore.run_id, aggregate="lore_sa_quality", central=central)
@@ -953,17 +966,18 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
     # (`ShapCallback`, `LoreSACallback`). These two are not, and cannot be: stability
     # compares TWO runs and the SHAP<->LORE agreement crosses two explainers. They run here,
     # at the end of the loops, the first moment at which every run exists.
-    if shape_metrics and encoded_feature_names is not None:
-        from . import xai_metrics as xmet
+    if do_shape:
         shape = xmet.collect(master, art_path,
-                             encoded_feature_names=encoded_feature_names, lore_idx=lore_idx)
-        stab = xmet.stability_table(master, art_path, encoded_feature_names)
+                             encoded_feature_names=encoded_feature_names, lore_idx=lore_idx,
+                             k=shape_top_k)
+        stab = xmet.stability_table(master, art_path, encoded_feature_names, k=shape_top_k)
         # Guarded before the loop writes anything: the pooled tables that follow are derived
         # from these two, so a population that is refused here never reaches them either.
         for df, name in ((shape, "xai_shape_metrics.csv"), (stab, "xai_stability.csv")):
             if len(df):
                 stamp_aggregate(os.path.join(out_dir, name), master.run_id,
-                                aggregate=name, lore_idx=lore_idx)
+                                aggregate=name, lore_idx=lore_idx, shape_top_k=shape_top_k,
+                                encoded_feature_names=list(encoded_feature_names))
         for df, name in ((shape, "xai_shape_metrics.csv"), (stab, "xai_stability.csv")):
             if len(df):
                 p = os.path.join(out_dir, name)
@@ -972,7 +986,7 @@ def report(master, art_path, kinds=("shap_tab", "lore_sa"), central=None, tag=""
         out["shape"], out["stability"] = shape, stab
         out["by_family"] = xmet.summary_by_family(art_path, shape_df=shape, stab_df=stab,
                                                   central=central, out_dir=out_dir,
-                                                  verbose=False)
+                                                  verbose=False, faith_df=faith, lore_df=lore)
         written.append(os.path.join(out_dir, "xai_summary_by_family.csv"))
 
     if verbose:

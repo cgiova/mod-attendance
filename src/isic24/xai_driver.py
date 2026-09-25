@@ -84,6 +84,25 @@ LORE_SA_KWARGS = dict(
     neigh_type="genetic", num_instances=1000, mutpb=0.5, init_mutpb=0.3, threshold=0.5,
 )
 
+
+def lore_sa_config():
+    """The result-defining LORE configuration and its stable fingerprint."""
+    import hashlib
+    from importlib.metadata import version
+
+    keys = ("rng_seed", "neigh_type", "num_instances", "mutpb", "init_mutpb",
+            "threshold", "gen_kwargs")
+    config = {
+        "implementation": "fixed-image-tabular-sa-v2",
+        "lore_sa_version": version("lore-sa"),
+        "seed_policy": "base-plus-sample-position",
+        **{k: LORE_SA_KWARGS.get(k) for k in keys},
+    }
+    config["gen_kwargs"] = dict(config["gen_kwargs"] or {})
+    raw = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return {**config, "fingerprint": f"lorecfg-{digest}"}
+
 # Where LORE runs. Its hot loop is the dense HEAD (~1000 evaluations per instance) plus the
 # genetic algorithm and the tree, which are pure CPU; the CNN runs once per run. So it keeps
 # the GPU busy 23 min/run while barely using it: on a shared machine, 42 hours of idle GPU.
@@ -457,9 +476,17 @@ def assert_run_feature_space(cfg, run_dir, declared_file, declared_fp=None):
 
     Returns the level the check reached -- ``"fingerprint"``, ``"file"`` or ``"width"`` --
     so a caller can say what was verified instead of implying more than it checked. A run
-    that records no space falls back to the width, which is all its config affords.
+    with no fingerprint falls back to its file, then to the encoded width.
     """
     run_file = cfg.get("feature_space_file")
+    run_fp = cfg.get("feature_space_fingerprint")
+    if run_fp is not None and declared_fp is not None:
+        if run_fp != declared_fp:
+            raise RuntimeError(
+                f"[FS GUARD] {run_dir}\n  records another FeatureSpace adapt state:\n"
+                f"  run  {run_fp} ({run_file})\n  live {declared_fp} ({declared_file})\n"
+                "Same width can still mean different statistics and row encodings.")
+        return "fingerprint"
     if run_file is None:
         return "width"
     if run_file != declared_file:
@@ -467,15 +494,7 @@ def assert_run_feature_space(cfg, run_dir, declared_file, declared_fp=None):
             f"[FS GUARD] {run_dir}\n  was trained against {run_file}, and this session "
             f"encodes with {declared_file}.\n  Every number the run produces here would be "
             f"computed on features it has never seen.")
-    run_fp = cfg.get("feature_space_fingerprint")
-    if run_fp is None or declared_fp is None:
-        return "file"
-    if run_fp != declared_fp:
-        raise RuntimeError(
-            f"[FS GUARD] {run_dir}\n  records the same path but another adapt state:\n"
-            f"  run  {run_fp}\n  live {declared_fp}\n  Same width, different statistics: "
-            f"the encoding differs row by row and nothing else would report it.")
-    return "fingerprint"
+    return "file"
 
 
 def load_run_model(run_dir, device=None):

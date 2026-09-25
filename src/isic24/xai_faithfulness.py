@@ -836,6 +836,8 @@ def explanation_faithfulness(model, run_dir, best_epoch, budgets=None,
     results = {"n_faith_samples": int(n), "faith_budgets": list(budgets),
                "blur_sigma": float(FAITH_BLUR_SIGMA if blur_sigma is None else blur_sigma),
                "tab_ranking": "shap_gradient" if tab_imp_override is None else "override"}
+    if need_tab and tab_imp_override is None:
+        results["encoded_feature_names"] = list(_CTX.encoded_feature_names)
     npz = {"q_grid": q_grid, "s_orig": s_orig, "labels": labs, "preds_orig": preds_orig}
     curves_json = {}
 

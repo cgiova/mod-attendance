@@ -55,3 +55,4 @@ Thumbs.db
 .vscode/settings.json
 notebooks/modality_attendance/mod-attendance.code-workspace
 ISIC24_STATIC_AUDIT.md
+docs/EXPLANATION_METHODS_AND_EVALUATION_METRICS.md

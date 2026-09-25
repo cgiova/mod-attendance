@@ -27,6 +27,7 @@ it shared one image embedding across samples, this one takes one per sample.
 
 from __future__ import annotations
 
+import random
 import time
 
 import numpy as np
@@ -402,6 +403,12 @@ class LoreEngineSA:
                 self.to_feature_dict, self.cat_cols, self.threshold)
             expl = self._make_explainer(bbox, dataset)
 
+            # `lore_sa` seeds Python's RNG with None while constructing each genetic
+            # generator. Reset both RNGs afterwards, once per sample: the package uses both.
+            sample_seed = self.random_state + i
+            random.seed(sample_seed)
+            np.random.seed(sample_seed)
+
             x = raw_df.iloc[i][self.feat_cols].copy()
             for c in self.cat_cols:
                 x[c] = str(x[c])
@@ -418,7 +425,8 @@ class LoreEngineSA:
             rule = (out or {}).get("rule")
             sur = getattr(expl, "surrogate", None)
             rows.append({
-                "i": i, "seconds": dt, "min_per_sample": dt / 60.0,
+                "i": i, "rng_seed": sample_seed, "seconds": dt,
+                "min_per_sample": dt / 60.0,
                 # NOT a quality measure: lore_sa sets it to dt.score(Z, Yb) on the very
                 # matrix the tree was fitted on. Named so it cannot be mistaken for one.
                 "fid_insample": (out or {}).get("fidelity"),
@@ -447,10 +455,19 @@ class LoreEngineSA:
                     print(f"        ⚠ {r['warning']}", flush=True)
 
         df = pd.DataFrame(rows)
-        mean = lambda c: float(df[c].dropna().mean()) if c in df and df[c].notna().any() else None
+        covered = (df["neigh_n_classes"].fillna(0) >= 2 if "neigh_n_classes" in df
+                   else pd.Series(False, index=df.index))
+
+        def mean(c, mask=None):
+            if c not in df:
+                return None
+            s = df.loc[mask, c] if mask is not None else df[c]
+            return float(s.dropna().mean()) if s.notna().any() else None
+
         stats = {
             "engine": "lore_sa", "neigh_type": self.neigh_type,
             "num_instances": self.num_instances, "gen_kwargs": dict(self.gen_kwargs),
+            "random_state": self.random_state,
             "n_explained": int(len(df)),
             "min_per_sample": mean("min_per_sample"),
             # cost
@@ -459,9 +476,10 @@ class LoreEngineSA:
             "neigh_unique_frac_mean": mean("neigh_unique_frac"),
             "neigh_top_frac_mean": mean("neigh_top_frac"),
             "neigh_pos_rate_mean": mean("neigh_pos_rate"),
+            "n_monoclass": int((~covered).sum()),
             "n_degenerate": int(df.warning.notna().sum()) if "warning" in df else 0,
             # quality of the explanation
-            "rule_len_mean": mean("rule_len"),
+            "rule_len_mean": mean("rule_len", covered),
             "fid_insample_mean": mean("fid_insample"),      # ~1.0 by construction
             "fid_cv_acc_mean": mean("fid_cv_acc"),
             "fid_cv_bacc_mean": mean("fid_cv_bacc"),        # the one that can discriminate
@@ -506,7 +524,8 @@ def _lore_sa_callback_cls():
             self.last_quality = {}
             self._engine = LoreEngineSA(
                 feature_space=feature_space, feat_cols=feat_cols,
-                to_feature_dict=to_feature_dict, training_df=training_df, **engine_kw)
+                to_feature_dict=to_feature_dict, training_df=training_df,
+                random_state=self.rng_seed, **engine_kw)
 
         def _freeze_batch(self, ds):
             # With subset_idx, read up to the highest position asked for and then index:
@@ -548,7 +567,6 @@ def _lore_sa_callback_cls():
             if epoch % self.every_n_epochs != 0 or self._images is None:
                 return
             from .xai_engines import append_epoch_row
-            np.random.seed(self.rng_seed)
             epoch_name = f"epoch{epoch:03d}"
             # `base_dir` is already `<run_dir>/xai/lore_sa/` (2026-08-01): the `tabular_sa/`
             # level that used to sit below told this engine from the legacy one when the two
@@ -603,11 +621,12 @@ def _lore_sa_callback_cls():
                 "lore_sa_rule_len": stats.get("rule_len_mean"),
                 "lore_sa_neigh_unique_frac": stats.get("neigh_unique_frac_mean"),
                 "lore_sa_neigh_pos_rate": stats.get("neigh_pos_rate_mean"),
+                "lore_sa_n_monoclass": stats.get("n_monoclass"),
                 "lore_sa_n_degenerate": stats.get("n_degenerate"),
                 # coverage: on how many samples the explanation is interpretable. It is to be
                 # REPORTED, not assumed -- measured that with the image frozen a share of the
                 # samples has a mono-class neighbourhood whatever the generator.
-                "lore_sa_coverage": (1 - stats.get("n_degenerate", 0) / max(1, len(df))),
+                "lore_sa_coverage": (1 - stats.get("n_monoclass", 0) / max(1, len(df))),
             }
             # A SHAPE metric (readability), computed here and not by a cell downstream:
             # `rule_len` normalised over the number of features, with EMPTY rules excluded
