@@ -33,8 +33,8 @@ This project investigates how explicitly controlling modality attention in multi
 
 ### Data
 
-This repo contains code and notebooks. The ISIC 2024 dataset is expected to be available locally. 
-Original dataset is available at the [isic 2024 official Kaggle challenge page](https://www.kaggle.com/competitions/isic-2024-challenge)
+This repository contains code and notebooks. The data used are expected to be available locally. 
+ISIC24 original dataset is available at the [isic 2024 official Kaggle challenge page](https://www.kaggle.com/competitions/isic-2024-challenge)
 
 ### Initializing
 Set an environment variable pointing to the dataset root folder:
