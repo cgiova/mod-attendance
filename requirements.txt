@@ -23,3 +23,6 @@ scikit-image<0.24
 tifffile<2025
 tqdm==4.67.3
 scipy==1.17.1
+et-xmlfile==2.0.0 
+openpyxl==3.1.5
+pydicom==3.0.2
