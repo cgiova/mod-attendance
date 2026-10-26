@@ -9,7 +9,7 @@ import pandas as pd
 
 
 def test_posthoc_summary_loading():
-    notebook = Path(__file__).resolve().parents[2] / "notebooks/modality_attendance/brset_modattendance_posthoc.ipynb"
+    notebook = Path(__file__).resolve().parents[2] / "notebooks/modality_attendance/brset/brset_modattendance_posthoc.ipynb"
     cells = ["".join(cell["source"]) for cell in json.loads(notebook.read_text())["cells"]]
     parameters = next(source for source in cells if source.startswith("# @@PARAMETERS@@"))
     loading = parameters[parameters.index("cf_combined ="):parameters.index('print(f"canonical')]

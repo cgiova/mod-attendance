@@ -8,7 +8,7 @@ import symtable
 
 
 NOTEBOOK = Path(__file__).resolve().parents[2] / (
-    "notebooks/modality_attendance/symile_modattendance_posthoc.ipynb"
+    "notebooks/modality_attendance/symile/symile_modattendance_posthoc.ipynb"
 )
 PREDECESSORS = {
     "@@GAMMA_ATTENDANCE@@": "@@LOGIT_DECOMP@@",

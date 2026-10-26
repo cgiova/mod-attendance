@@ -394,12 +394,16 @@ def _agreement_null(A_sets, B_sets, raw_features, n_perm=N_PERM_AGREEMENT, seed=
 def setting_value(impl_name, setting_tag):
     """The NUMERIC value of a family's parameter axis, or None when it has none.
 
-    Three families out of six have an axis (`fixed_scaling` 9 points, `learnable_scaling` 5,
-    `loss_regularization` 5). `vanilla`, `controlled_fusion` and `adaptive_gating` have a
-    single setting: for them "adjacent configurations" is NOT defined, and the metric is not
-    computed rather than computed over an invented pair.
+    Scaling, regularization and adaptive-gating entropy grids have trained-setting axes.
+    Adaptive gating retains `base` for entropy weight 1e-4. Vanilla and Controlled Fusion
+    have no trained-setting axis; frozen gamma interventions are a separate population.
     """
     t = str(setting_tag)
+    if impl_name == "adaptive_gating":
+        if t == "base":
+            return 1e-4
+        m = re.fullmatch(r"ent(\d)e([+-]\d\d)", t)
+        return float(f"{m.group(1)}e{m.group(2)}") if m else None
     m = re.search(r"a(\d)p(\d{3})$", t)                    # a0p500 / init_a0p500
     if m:
         return float(f"{m.group(1)}.{m.group(2)}")

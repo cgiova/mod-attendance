@@ -18,7 +18,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("MPLBACKEND", "Agg")
 from isic24 import xai_metrics as xm, xai_subset as xs
 
-NOTEBOOK = ROOT / "notebooks/modality_attendance/brset_modattendance_posthoc.ipynb"
+NOTEBOOK = ROOT / "notebooks/modality_attendance/brset/brset_modattendance_posthoc.ipynb"
 CELLS = ["".join(c["source"]) for c in json.loads(NOTEBOOK.read_text())["cells"]
          if c["cell_type"] == "code"]
 SEEDS = (8, 47, 53, 71, 90, 101)
