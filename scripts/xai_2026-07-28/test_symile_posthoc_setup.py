@@ -8,12 +8,13 @@ import symtable
 
 
 NOTEBOOK = Path(__file__).resolve().parents[2] / (
-    "notebooks/modality_attendance/symile_modattendance_posthoc.ipynb"
+    "notebooks/modality_attendance/symile/symile_modattendance_posthoc.ipynb"
 )
 PREDECESSORS = {
     "@@GAMMA_ATTENDANCE@@": "@@LOGIT_DECOMP@@",
     "@@STRATA_SECTION@@ 2/3": "@@STRATA_SECTION@@ 1/3",
     "@@STRATA_SECTION@@ 3/3": "@@STRATA_SECTION@@ 1/3",
+    "@@FEATURE_PROVENANCE@@ 2/2": "@@FEATURE_PROVENANCE@@ 1/2",
 }
 
 
@@ -25,8 +26,9 @@ def global_reads(table):
     return names
 
 
-def test_posthoc_setup():
-    notebook = json.loads(NOTEBOOK.read_text())
+def test_posthoc_setup(notebook_path=None):
+    notebook_path = NOTEBOOK if notebook_path is None else notebook_path
+    notebook = json.loads(notebook_path.read_text())
     setup = set(dir(builtins)) | {"display", "get_ipython"}
     definitions = {}
     in_setup = True
@@ -34,9 +36,9 @@ def test_posthoc_setup():
         if cell["cell_type"] != "code":
             continue
         source = "".join(cell["source"])
-        marker = re.search(r"@@[A-Z0-9_]+@@(?: [123]/3)?", source.splitlines()[0]).group()
-        compile(source, str(NOTEBOOK), "exec")
-        table = symtable.symtable(source, str(NOTEBOOK), "exec")
+        marker = re.search(r"@@[A-Z0-9_]+@@(?: [123]/[23])?", source.splitlines()[0]).group()
+        compile(source, str(notebook_path), "exec")
+        table = symtable.symtable(source, str(notebook_path), "exec")
         defined = {s.get_name() for s in table.get_symbols()
                    if s.is_assigned() or s.is_imported() or s.is_namespace()}
         available = setup | defined

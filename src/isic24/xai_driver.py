@@ -208,7 +208,8 @@ _CLOBBERABLE = {
     # Not engines of `make_xai_callbacks`: `xai_faithfulness` writes both. They are here
     # because `existing_xai_artifacts` is the only place that knows what a run has already
     # produced, and the faithfulness loop asks it for the same reason the others do.
-    "shap_tab": ("xai/shap_tab/faithfulness_aligned_signed_*.json",),
+    "shap_tab": ("xai/shap_tab/faithfulness_aligned_signed_*.json",
+                 "xai/shap_tab/faithfulness_aligned_signed_*_curves.npz"),
     "faithfulness": ("xai/faithfulness/*.json", "xai/faithfulness/*_curves.npz"),
 }
 

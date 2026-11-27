@@ -542,10 +542,16 @@ def gate_summary(df):
 
     d_img = np.abs(_logit(df.prediction) - _logit(df.prediction_img_off))
     d_tab = np.abs(_logit(df.prediction) - _logit(df.prediction_tab_off))
+    weights = df[["w_img", "w_tab"]].to_numpy()
+    entropy = -(weights * np.log(np.clip(weights, 1e-12, 1))).sum(axis=1)
     return {
         "n": int(len(df)),
         "gate_weight_mean_img": float(df.w_img.mean()),
         "gate_weight_mean_tab": float(df.w_tab.mean()),
+        "gate_weight_std_img": float(df.w_img.std(ddof=0)),
+        "gate_entropy_mean": float(entropy.mean()),
+        "gate_entropy_std": float(entropy.std()),
+        "gate_selective_fraction": float((weights.max(axis=1) >= 0.9).mean()),
         "spearman_w_img_delta_img": float(stats.spearmanr(df.w_img, d_img).statistic),
         "spearman_w_tab_delta_tab": float(stats.spearmanr(df.w_tab, d_tab).statistic),
     }
