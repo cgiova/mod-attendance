@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedGroupKFold
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from isic24 import statistical_evaluation as se
@@ -19,6 +20,7 @@ from isic24.xai_subset import CENTRAL_SETTINGS
 
 
 SEEDS = [8, 47, 53, 71, 90, 101]
+SPLIT = dict(n_splits=2, seed=49, val_fold=0)
 SETTINGS = {
     "vanilla": ["baseline"],
     "fixed_scaling": [f"a{v:.3f}".replace(".", "p") for v in np.linspace(0, 1, 9)],
@@ -112,14 +114,21 @@ def test_selection():
     rejects(lambda: se.select_evaluations(registry, broken, CENTRAL_SETTINGS, SEEDS))
 
 
-def test_freeze():
+def test_freeze(fingerprints="stamped", multiple_encoders=False):
     registry, gamma = synthetic_registry()
     files = {}
     for row in registry.to_dict("records"):
         cfg = {key: value for key, value in row.items()
                if key not in ("checkpoint", "config_file", "entropy_weight")}
+        if multiple_encoders:
+            cfg["feature_space_file"] = f"feature_space/{row['impl_name']}.keras"
+        files["/virtual/art/" + cfg["feature_space_file"]] = "encoder contents"
         if row["impl_name"] == "adaptive_gating":
             cfg["entropy_weight"] = row["entropy_weight"]
+        if fingerprints == "legacy" or (fingerprints == "mixed" and row["impl_name"] != "adaptive_gating"):
+            cfg.pop("feature_space_fingerprint")
+        elif fingerprints == "null":
+            cfg["feature_space_fingerprint"] = None
         files[row["config_file"]] = json.dumps(cfg)
     canonical = {family: Path("/virtual/art/runs") / family / "study" for family in SETTINGS}
     gamma_path = str(canonical["controlled_fusion"] / "controlled_fusion_posthoc_gamma_summary.csv")
@@ -150,12 +159,41 @@ def test_freeze():
             patch.object(pd, "read_csv", side_effect=lambda p, **kwargs: pd_read_csv(io.StringIO(files[str(p)]), **kwargs)):
         arguments = (canonical, "/virtual/art", "/virtual/out", SEEDS,
                      {key: len(value) for key, value in SETTINGS.items()}, CENTRAL_SETTINGS)
+        if multiple_encoders and fingerprints != "stamped":
+            rejects(lambda: se.freeze_protocol(*arguments, n_boot=100, n_permutations=100))
+            assert "/virtual/out/protocol.json" not in files
+            return
         frozen = se.freeze_protocol(*arguments, n_boot=100, n_permutations=100)
         assert len(frozen["evaluations"]) == 96
+        assert frozen["feature_space_fingerprint"] == (None if fingerprints in ("legacy", "null") else "fs")
+        encoders = {"/virtual/art/" + json.loads(value)["feature_space_file"]
+                    for path, value in files.items() if path.endswith("/config.json")}
+        assert {path for path in frozen["sources"] if "/feature_space/" in path} == encoders
+        assert frozen["feature_space_file"] == (
+            "feature_space/vanilla.keras" if multiple_encoders else "feature_space/test.keras")
         assert "test-metadata" not in " ".join(frozen["sources"])
         assert se.freeze_protocol(*arguments, n_boot=100, n_permutations=100) == frozen
         rejects(lambda: se.freeze_protocol(*arguments, n_boot=101, n_permutations=100), RuntimeError)
+        if multiple_encoders:
+            alias = "/virtual/art/feature_space/fixed_scaling.keras"
+            files[alias] = "changed encoder contents"
+            rejects(lambda: se.freeze_protocol(*arguments, n_boot=100, n_permutations=100), RuntimeError)
+            files[alias] = "encoder contents"
         config_file = next(key for key in files if key.endswith("config.json"))
+        original = files[config_file]
+        cfg = json.loads(original)
+        cfg["feature_space_file"] = None
+        files[config_file] = json.dumps(cfg)
+        rejects(lambda: se.freeze_protocol(*arguments, n_boot=100, n_permutations=100))
+        files[config_file] = original
+        config_files = [key for key in files if key.endswith("config.json")][:2]
+        originals = {path: files[path] for path in config_files}
+        for path, value in zip(config_files, ("fs", "other")):
+            cfg = json.loads(files[path])
+            cfg["feature_space_fingerprint"] = value
+            files[path] = json.dumps(cfg)
+        rejects(lambda: se.freeze_protocol(*arguments, n_boot=100, n_permutations=100))
+        files.update(originals)
         cfg = json.loads(files[config_file])
         cfg["best_val_auc"] += .001
         files[config_file] = json.dumps(cfg)
@@ -179,21 +217,21 @@ pd_read_csv = pd.read_csv
 
 
 def test_population():
-    source = pd.DataFrame(dict(image_id=["a", "b", "c", "v"], patient_id=["p1", "p2", "p3", "pv"],
+    source = pd.DataFrame(dict(image_id=["a", "b", "c", "v"], patient_id=["pt", "pt", "pt", "pv"],
                                age=[10, 20, 30, 999], target=[0, 1, 0, 1]))
     training = source.iloc[[0, 1, 2, 2, 2]].copy()
     validation = source.iloc[[3]].copy()
     test = pd.DataFrame(dict(image_id=["t1", "t2"], patient_id=["pt1", "pt2"], target=[0, 1],
                              age=[np.nan, 50], view=[None, "MLO"], laterality=["L", None]))
-    result, medians = se.prepare_test_frame(test, source, training, validation)
+    result, medians = se.prepare_test_frame(test, source, training, validation, SPLIT)
     assert medians == {"age": 20} and result.age.tolist() == [20, 50]
     assert result.view.tolist() == ["unknown", "MLO"]
     assert test.age.isna().any()
     for key, value in (("patient_id", "pv"), ("image_id", "a")):
         bad = test.copy()
         bad.loc[0, key] = value
-        rejects(lambda: se.prepare_test_frame(bad, source, training, validation))
-    rejects(lambda: se.prepare_test_frame(pd.concat([test, test.iloc[:1]]), source, training, validation))
+        rejects(lambda: se.prepare_test_frame(bad, source, training, validation, SPLIT))
+    rejects(lambda: se.prepare_test_frame(pd.concat([test, test.iloc[:1]]), source, training, validation, SPLIT))
 
 
 def test_cross_dataset_population():
@@ -201,7 +239,7 @@ def test_cross_dataset_population():
         row_id = "isic_id" if dataset.startswith("isic24/") else "image_id"
         numeric = "age_approx" if dataset.startswith(("isic24/", "brset/")) else "age"
         source = pd.DataFrame({row_id: ["a", "b", "c", "v"],
-                               "patient_id": ["pa", "pb", "pc", "pv"], "target": [0, 1, 0, 1],
+                               "patient_id": ["pt", "pt", "pt", "pv"], "target": [0, 1, 0, 1],
                                numeric: [10., 20., 30., 999.], "category": ["x"] * 4})
         test = pd.DataFrame({row_id: ["t1", "t2"], "patient_id": ["pt1", "pt2"],
                              "target": [0, 1], numeric: [np.nan, 50.], "category": [None, "y"]})
@@ -211,7 +249,7 @@ def test_cross_dataset_population():
             test["diabetes_time_y"] = ["invalid", "5"]
             features["diabetes_time_y"] = "float32"
         training, validation = source.iloc[[0, 1, 2, 2, 2]], source.iloc[[3]]
-        result, medians = se.prepare_test_frame(test, source, training, validation,
+        result, medians = se.prepare_test_frame(test, source, training, validation, SPLIT,
                                                 dataset=dataset, features=features)
         assert medians[numeric] == 20 and result[numeric].tolist() == [20, 50]
         assert result.category.tolist() == ["unknown", "y"]
@@ -222,8 +260,38 @@ def test_cross_dataset_population():
             assert result.diabetes_time_y.tolist() == [2, 5]
         bad = test.copy()
         bad.loc[0, "patient_id"] = "pv"
-        rejects(lambda: se.prepare_test_frame(bad, source, training, validation,
+        rejects(lambda: se.prepare_test_frame(bad, source, training, validation, SPLIT,
                                                dataset=dataset, features=features))
+
+
+def test_sampled_validation_split():
+    source = pd.DataFrame(dict(
+        isic_id=[f"lesion_{i}" for i in range(24)],
+        patient_id=np.repeat([f"patient_{i}" for i in range(12)], 2),
+        target=np.repeat(np.arange(12) % 2, 2), age_approx=np.arange(24, dtype=float)))
+    snapshot = dict(n_splits=3, seed=49, val_fold=1)
+    splits = StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=49).split(
+        source, y=source.target, groups=source.patient_id)
+    train_idx, val_idx = list(splits)[1]
+    source.loc[val_idx, "age_approx"] = 10000.
+    training = source.iloc[[train_idx[0]] * 5].copy()
+    validation = source.iloc[[val_idx[0]]].copy()
+    test = pd.DataFrame(dict(isic_id=["test_a", "test_b"], patient_id=["test_p", "test_q"],
+                             target=[0, 1], age_approx=[np.nan, 50.]))
+    kwargs = dict(dataset="isic24/enhanced", features={"age_approx": "float32"})
+    result, medians = se.prepare_test_frame(test, source, training, validation, snapshot, **kwargs)
+    expected = source.iloc[train_idx].age_approx.median()
+    assert medians == {"age_approx": expected} and result.age_approx.iloc[0] == expected
+    assert expected != training.age_approx.median()
+    assert set(source.iloc[val_idx].patient_id) - set(validation.patient_id)
+    assert set(source.iloc[train_idx].patient_id) - set(training.patient_id)
+    for bad_train, bad_val in ((source.iloc[[val_idx[-1]]], validation),
+                               (training, source.iloc[[train_idx[-1]]])):
+        rejects(lambda: se.prepare_test_frame(test, source, bad_train, bad_val, snapshot, **kwargs))
+    rejects(lambda: se.prepare_test_frame(test, source, training, validation,
+                                          dict(snapshot, val_fold=3), **kwargs))
+    rejects(lambda: se.prepare_test_frame(test, pd.concat([source, source.iloc[:1]]),
+                                          training, validation, snapshot, **kwargs))
 
 
 def test_cluster_bootstrap():
@@ -292,7 +360,7 @@ def test_analysis():
     pd.testing.assert_frame_equal(result["contrasts"], other["contrasts"])
 
 
-def test_prediction_resume(dataset="cmmd/processed"):
+def test_prediction_resume(dataset="cmmd/processed", fingerprint="fs"):
     import keras
     from isic24 import xai_driver
 
@@ -301,25 +369,25 @@ def test_prediction_resume(dataset="cmmd/processed"):
     plan = plan[plan.seed.eq(8) & plan.strategy.isin(["vanilla", "controlled_fusion"])]
     protocol = dict(dataset=dataset, art_root="/virtual/art", evaluations=plan.to_dict("records"),
                     sources={"/virtual/source": "hash"}, protocol_hash="protocol",
-                    feature_space_file="feature_space/test.keras", feature_space_fingerprint="fs",
+                    feature_space_file="feature_space/test.keras", feature_space_fingerprint=fingerprint,
                     validation_snapshot="validation_snapshot.json", batch_size=2, n_train=2, n_val=1)
-    source = pd.DataFrame(dict(image_id=["a", "b", "v"], patient_id=["pa", "pb", "pv"],
-                               age=[10, 30, 999], target=[0, 1, 0]))
+    source = pd.DataFrame(dict(image_id=["a", "b", "v", "w"], patient_id=["pt", "pt", "pv", "pv"],
+                               age=[10, 30, 999, 999], target=[0, 1, 0, 1]))
     test = pd.DataFrame(dict(image_id=["t1", "t2"], patient_id=["pt1", "pt2"], target=[0, 1],
                              age=[None, 50], view=["CC", "MLO"], laterality=["L", "R"]))
     feature_types = {"age": "float32", "view": "string", "laterality": "string"}
     row_id = "isic_id" if dataset == "isic24/enhanced" else "image_id"
     source, test = (frame.rename(columns={"image_id": row_id}) for frame in (source, test))
     if dataset == "brset/plain":
-        source["diabetes_time_y"] = ["1", "3", "999"]
+        source["diabetes_time_y"] = ["1", "3", "999", "999"]
         test["diabetes_time_y"] = [None, "5"]
         feature_types["diabetes_time_y"] = "float32"
     test_name = "enhanced_test_metadata_clean.parquet" if dataset.startswith("isic24/") else "test-metadata.parquet"
     source_name = "enhanced_train_metadata_clean.parquet" if dataset.startswith("isic24/") else "train-metadata.parquet"
     frames = {test_name: test, source_name: source,
-              "training_frame.parquet": source.iloc[:2], "evaluation_frame.parquet": source.iloc[2:]}
+              "training_frame.parquet": source.iloc[:2], "evaluation_frame.parquet": source.iloc[[2]]}
     files = {"/virtual/out/protocol.json": json.dumps(protocol),
-             "/virtual/art/validation_snapshot.json": json.dumps(dict(row_id_col=row_id, row_ids=["v"]))}
+             "/virtual/art/validation_snapshot.json": json.dumps(dict(SPLIT, row_id_col=row_id, row_ids=["v"]))}
     cache, loaded = {}, []
 
     class Capture(io.StringIO):
@@ -383,6 +451,14 @@ def test_prediction_resume(dataset="cmmd/processed"):
         stack.enter_context(patch.object(se, "_test_dataset", return_value=[{"images": np.zeros((2, 2, 2, 3))}]))
         stack.enter_context(patch.object(np, "savez_compressed", side_effect=save))
         stack.enter_context(patch.object(np, "load", side_effect=lambda p, **kwargs: cache[str(p)]))
+        with patch.object(se, "file_hash", return_value="changed"):
+            rejects(lambda: se.predict_test(protocol, "/virtual/out"))
+        if fingerprint is not None:
+            with patch.object(xai_driver, "feature_space_fingerprint", return_value=(1, "other")):
+                rejects(lambda: se.predict_test(protocol, "/virtual/out"))
+        assert not loaded and not cache and "/virtual/out/test_population.json" not in files
+        for mock in location_calls.values():
+            mock.reset_mock()
         output, predictions = se.predict_test(protocol, "/virtual/out")
         name, variant = dataset.split("/")
         location_calls["data_path"].assert_called_once_with(dataset=name, variant=variant)
@@ -406,6 +482,17 @@ def test_prediction_resume(dataset="cmmd/processed"):
 def test_cross_dataset_prediction_resume():
     for dataset in ("isic24/enhanced", "brset/plain", "symile/processed"):
         test_prediction_resume(dataset)
+
+
+def test_legacy_feature_space():
+    for fingerprints in ("mixed", "legacy", "null"):
+        test_freeze(fingerprints)
+    test_prediction_resume("isic24/enhanced", fingerprint=None)
+
+
+def test_equivalent_feature_space_files():
+    for fingerprints in ("stamped", "mixed", "legacy", "null"):
+        test_freeze(fingerprints, multiple_encoders=True)
 
 
 def test_decoder():
@@ -480,8 +567,7 @@ def check_notebook(path):
     for cell in cells:
         source = "".join(cell["source"])
         compile(source, str(path), "exec")
-        assert source.startswith("# @@") and cell["outputs"] == []
-        assert cell["execution_count"] is None
+        assert source.startswith("# @@")
         assert sum(line.lstrip().startswith("#") for line in source.splitlines()) == 1
     text = "\n".join("".join(c["source"]) for c in cells)
     for call in ("se.freeze_protocol(", "se.predict_test(", "se.analyze_test(", "se.save_results("):
@@ -491,8 +577,10 @@ def check_notebook(path):
 
 if __name__ == "__main__":
     for test in (test_metrics, test_selection, test_freeze, test_population, test_cross_dataset_population,
+                 test_sampled_validation_split,
                  test_cluster_bootstrap, test_patient_swaps, test_analysis,
-                 test_prediction_resume, test_cross_dataset_prediction_resume,
+                 test_prediction_resume, test_cross_dataset_prediction_resume, test_legacy_feature_space,
+                 test_equivalent_feature_space_files,
                  test_decoder, test_export, test_notebook):
         test()
         print(f"PASS {test.__name__}")

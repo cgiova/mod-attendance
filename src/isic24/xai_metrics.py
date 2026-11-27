@@ -40,6 +40,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -888,7 +889,7 @@ def _iou_median(A, B):
 
 
 def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_TOP_FRAC,
-                      out_dir=None):
+                      out_dir=None, *, archive_legacy=False):
     """Do two FAMILIES look in the same places more than two SEEDS of one family do?
 
     The effect and its null are the same kind of number: cross-family pairs (two families,
@@ -901,9 +902,10 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
     heavily and a single rule would not show it: `cam_masks` (half of each map's range,
     the convention the engine already uses) and the top `frac` cells of each map.
 
-    With `out_dir` the table is written as `cam_overlap.csv` and stamped with the runs that
-    carried a heatmap — not the ones asked for, which is the difference only this function
-    can see.
+    Each pair retains both run identities. With `out_dir`, the table is written as
+    `cam_overlap.csv` and stamped with the runs that carried a heatmap. With
+    `archive_legacy=True`, an existing table without run identities and its provenance
+    are moved to a unique archive directory before export; identified tables stay guarded.
     """
     from . import xai_subset as xs
 
@@ -922,7 +924,7 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
             raise RuntimeError(
                 "[CAM OVERLAP] two runs have Grad-CAM on different samples: the IoU would "
                 f"compare heatmaps of different lesions ({fp0!r} vs {fp!r}).")
-        store[(r.impl_name, r.seed)] = (cam_masks(cams), _cam_top_masks(cams, frac))
+        store[(r.impl_name, r.seed)] = (cam_masks(cams), _cam_top_masks(cams, frac), r.run_id)
         used.append(r.run_id)
 
     fams = sorted({f for f, _ in store})
@@ -934,6 +936,7 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
                 if (fa, s) in store and (fb, s) in store:
                     A, B = store[(fa, s)], store[(fb, s)]
                     rows.append(dict(pair_kind="cross_family", impl_a=fa, impl_b=fb,
+                                     run_id_a=A[2], run_id_b=B[2],
                                      seed_a=s, seed_b=s, iou_half=_iou_median(A[0], B[0]),
                                      iou_top=_iou_median(A[1], B[1])))
     for f in fams:
@@ -942,11 +945,20 @@ def cam_overlap_table(master, art_path, central=None, mode="context", frac=CAM_T
                 if (f, sa) in store and (f, sb) in store:
                     A, B = store[(f, sa)], store[(f, sb)]
                     rows.append(dict(pair_kind="seed_null", impl_a=f, impl_b=f,
+                                     run_id_a=A[2], run_id_b=B[2],
                                      seed_a=sa, seed_b=sb, iou_half=_iou_median(A[0], B[0]),
                                      iou_top=_iou_median(A[1], B[1])))
     out = pd.DataFrame(rows)
     if out_dir:
         path = os.path.join(out_dir, "cam_overlap.csv")
+        if archive_legacy and os.path.exists(path):
+            columns = pd.read_csv(path, nrows=0).columns
+            if not any(c.startswith("run_id") for c in columns):
+                archive = tempfile.mkdtemp(prefix="cam_overlap.legacy-", dir=out_dir)
+                for source in (path, os.path.splitext(path)[0] + ".provenance.json"):
+                    if os.path.exists(source):
+                        os.rename(source, os.path.join(archive, os.path.basename(source)))
+                print(f"[CAM OVERLAP] Archived legacy export: {archive}")
         xs.stamp_aggregate(path, used, aggregate="cam_overlap.csv", mode=mode, frac=frac)
         out.to_csv(path, index=False)
     return out

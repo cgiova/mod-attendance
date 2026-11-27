@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
+from sklearn.model_selection import StratifiedGroupKFold
 
 from . import paths
 
@@ -113,10 +114,18 @@ def freeze_protocol(canonical, art_root, output_dir, seeds, expected_settings, r
     registry = pd.DataFrame(records)
     if not registry.run_id.is_unique:
         raise ValueError("Duplicate run identities")
-    for key in ("feature_space_file", "feature_space_fingerprint", "validation_snapshot",
-                "n_train", "n_val", "batch_size"):
-        if registry[key].isna().any() or registry[key].nunique() != 1:
+    for key in ("feature_space_file", "validation_snapshot", "n_train", "n_val", "batch_size"):
+        if (registry[key].isna().any()
+                or (key != "feature_space_file" and registry[key].nunique() != 1)):
             raise ValueError(f"Inconsistent frozen input: {key}")
+    # Distinct encoder files require matching recorded adapt fingerprints on every run.
+    fingerprints = {r["feature_space_fingerprint"] for r in records
+                    if r.get("feature_space_fingerprint") is not None}
+    if len(fingerprints) > 1:
+        raise ValueError("Inconsistent frozen input: feature_space_fingerprint")
+    if (registry.feature_space_file.nunique() > 1
+            and any(r.get("feature_space_fingerprint") is None for r in records)):
+        raise ValueError("Distinct FeatureSpace files require a recorded fingerprint on every run")
     weights = registry[registry.impl_name.eq("adaptive_gating")].groupby("setting_tag").entropy_weight
     if (not weights.nunique().eq(1).all()
             or set(weights.first()) != {0, 1e-4, 1e-3, 1e-2, 1e-1}
@@ -127,7 +136,8 @@ def freeze_protocol(canonical, art_root, output_dir, seeds, expected_settings, r
     gamma.columns = gamma.columns.str.strip()
     plan = select_evaluations(registry, gamma, reference, seeds)
     first = records[0]
-    for path in (gamma_file, art_root / first["feature_space_file"],
+    feature_files = [art_root / name for name in registry.feature_space_file.unique()]
+    for path in (gamma_file, *feature_files,
                  art_root / first["validation_snapshot"], art_root / "training_frame.parquet",
                  art_root / "evaluation_frame.parquet", Path(__file__)):
         sources[str(path)] = file_hash(path)
@@ -137,7 +147,7 @@ def freeze_protocol(canonical, art_root, output_dir, seeds, expected_settings, r
         version=2, dataset=dataset, art_root=str(art_root), seeds=list(seeds),
         evaluations=plan.to_dict("records"), sources=sources,
         feature_space_file=first["feature_space_file"],
-        feature_space_fingerprint=first["feature_space_fingerprint"],
+        feature_space_fingerprint=next(iter(fingerprints), None),
         validation_snapshot=first["validation_snapshot"], batch_size=int(first["batch_size"]),
         n_train=int(first["n_train"]), n_val=int(first["n_val"]),
         n_boot=int(n_boot), n_permutations=int(n_permutations), random_seed=int(random_seed),
@@ -163,7 +173,7 @@ def freeze_protocol(canonical, art_root, output_dir, seeds, expected_settings, r
     return payload
 
 
-def prepare_test_frame(test, source, training, validation, *, dataset="cmmd/processed",
+def prepare_test_frame(test, source, training, validation, snapshot, *, dataset="cmmd/processed",
                        features=None):
     """Check patient separation and reproduce imputation from natural training rows only."""
     row_id = "isic_id" if dataset == "isic24/enhanced" else "image_id"
@@ -178,10 +188,20 @@ def prepare_test_frame(test, source, training, validation, *, dataset="cmmd/proc
                 raise ValueError(f"Test/{name} {key} overlap or missing identities")
     if set(training.patient_id.astype(str)) & set(validation.patient_id.astype(str)):
         raise ValueError("Frozen training/validation patients overlap")
-    natural = source[~source[row_id].astype(str).isin(validation[row_id].astype(str))].copy()
-    if (not source[row_id].astype(str).is_unique
-            or not set(validation[row_id].astype(str)) <= set(source[row_id].astype(str))
-            or set(natural.patient_id.astype(str)) & set(validation.patient_id.astype(str))
+    if not source[row_id].astype(str).is_unique:
+        raise ValueError("Development source identities must be unique")
+    # Replay the full patient split: sampled validation rows do not identify its whole fold.
+    splitter = StratifiedGroupKFold(n_splits=snapshot["n_splits"], shuffle=True,
+                                   random_state=snapshot["seed"])
+    for fold, (train_idx, val_idx) in enumerate(
+            splitter.split(source, y=source.target, groups=source.patient_id)):
+        if fold == snapshot["val_fold"]:
+            natural = source.iloc[train_idx].copy()
+            held_out = source.iloc[val_idx]
+            break
+    else:
+        raise ValueError("Invalid frozen validation fold")
+    if (not set(validation[row_id].astype(str)) <= set(held_out[row_id].astype(str))
             or not set(training[row_id].astype(str)) <= set(natural[row_id].astype(str))):
         raise ValueError("Frozen development frames disagree with the source split")
     result = test.copy()
@@ -251,7 +271,8 @@ def predict_test(protocol, output_dir):
         test_file, source_file = data / "test-metadata.parquet", data / "train-metadata.parquet"
     image_file = paths.data_dir(dataset=dataset) / "test-image.hdf5"
     fs = keras.models.load_model(root / protocol["feature_space_file"])
-    if feature_space_fingerprint(fs)[1] != protocol["feature_space_fingerprint"]:
+    expected_fp = protocol["feature_space_fingerprint"]
+    if expected_fp is not None and feature_space_fingerprint(fs)[1] != expected_fp:
         raise ValueError("FeatureSpace fingerprint mismatch")
     validation = pd.read_parquet(root / "evaluation_frame.parquet")
     training = pd.read_parquet(root / "training_frame.parquet")
@@ -261,7 +282,7 @@ def predict_test(protocol, output_dir):
         raise ValueError("Frozen validation snapshot mismatch")
     frame, medians = prepare_test_frame(
         pd.read_parquet(test_file), pd.read_parquet(source_file),
-        training, validation, dataset=protocol["dataset"],
+        training, validation, snapshot, dataset=protocol["dataset"],
         features={col: spec.dtype for col, spec in fs.features.items()})
     population = dict(protocol_hash=protocol["protocol_hash"], training_feature_medians=medians,
                       files={str(p): file_hash(p) for p in (test_file, source_file, image_file)},

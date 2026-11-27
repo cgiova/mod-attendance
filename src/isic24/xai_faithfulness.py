@@ -1162,19 +1162,58 @@ def _target_gain_persample(curves_npz_path, labels, direction="del", q_max=None)
     return float(np.mean(g * sgn))
 
 
+def _load_signed_mode(out_dir, out_name, subset_idx, labels, budgets, do_insertion):
+    """Load a complete signed mode only when its ordered sample and curves match."""
+    from . import xai_subset as _xs
+
+    json_path = os.path.join(out_dir, f"{out_name}.json")
+    npz_path = os.path.join(out_dir, f"{out_name}_curves.npz")
+    present = [os.path.exists(p) for p in (json_path, npz_path)]
+    if not any(present):
+        return None
+    problem = f"[SIGNED RESUME] Incomplete or incompatible outputs for {out_name} in {out_dir}"
+    if not all(present):
+        raise RuntimeError(problem)
+    with open(json_path) as f:
+        result = json.load(f)
+    q_grid = np.asarray((0.0,) + tuple(budgets))
+    directions = ("del", "ins") if do_insertion else ("del",)
+    with np.load(npz_path) as z:
+        expected = {"val_index": subset_idx, "labels": labels, "q_grid": q_grid,
+                    **_xs.stamp_row_ids(subset_idx)}
+        if any(k not in z or not np.array_equal(z[k], v) for k, v in expected.items()):
+            raise RuntimeError(problem)
+        for direction in directions:
+            for arm in ("exp", "rand"):
+                key = f"{direction}_{arm}_tabular"
+                if (key not in z or z[key].shape != (len(labels), len(q_grid))
+                        or not np.isfinite(z[key]).all()):
+                    raise RuntimeError(problem)
+            gain = f"faithfulness_tabular_{direction}_gain"
+            if gain not in result or not np.isfinite(result[gain]):
+                raise RuntimeError(problem)
+    if (result.get("subset_fingerprint") != ACTIVE_SUBSET_FINGERPRINT
+            or result.get("n_faith_samples") != len(labels)
+            or result.get("tab_ranking") != "override"
+            or not np.array_equal(result.get("q_grid"), q_grid)):
+        raise RuntimeError(problem)
+    return result
+
+
 def aligned_signed_faithfulness(model, run_dir, best_epoch, phi=None, labels=None,
                                 raw_df=None, imgs=None, modes=SIGNED_MODES,
                                 background="baseline", out_dir=None,
                                 out_prefix="faithfulness_aligned_signed",
                                 save=True, verbose=True, q_maxes=(0.20,),
-                                subset_idx=None, allow_clobber=False, **kw):
+                                subset_idx=None, allow_clobber=False, resume=False, **kw):
     """Deletion + insertion under each sign convention, from ONE attribution pass.
 
     Writes into `<run_dir>/xai/shap_tab/` — its own folder inside the run, which no canonical
     engine touches. Every name is `out_prefix`-ed, so it never grazes `faithfulness.json`,
     `faithfulness_curves.npz` or `faithfulness_aligned_attr.csv`.
 
-    It also produces the per-run FIGURE (`plots/`): the engine draws it, not a cell downstream.
+    ``resume=True`` reuses complete modes after sample/curve checks and writes missing modes.
+    Legacy files do not certify attribution or random-baseline configuration retrospectively.
     """
     from . import xai_subset as _xs
     if out_dir is None:
@@ -1182,9 +1221,11 @@ def aligned_signed_faithfulness(model, run_dir, best_epoch, phi=None, labels=Non
         # The write guard applies here too, now that this writes INSIDE the run: re-running on
         # a run that already has `xai/shap_tab/` would overwrite it. Only on the default
         # destination — with an explicit `out_dir` the write is elsewhere and protects nothing.
-        if save:
+        if save and not resume:
             from . import xai_driver as _xd
             _xd.assert_writable(run_dir, engines=("shap_tab",), allow_clobber=allow_clobber)
+    if resume and not save:
+        raise ValueError("Signed-mode resume requires save=True")
     # `subset_idx` must reach BOTH steps: the attributions are computed on these rows and the
     # perturbation must run on the SAME ones. Passing it only through **kw once gave
     # attributions on one sample and deletions on another, misaligned and without an error.
@@ -1192,6 +1233,14 @@ def aligned_signed_faithfulness(model, run_dir, best_epoch, phi=None, labels=Non
         raw_df, imgs, labels = _build_faith_subset(subset_idx=subset_idx)
     if subset_idx is not None:
         kw["subset_idx"] = subset_idx
+    cached = {}
+    if resume:
+        eff_subset = np.asarray(subset_idx if subset_idx is not None else FAITH_SUBSET_IDX, int)
+        cached = {mode: _load_signed_mode(
+            out_dir, f"{out_prefix}_{mode}", eff_subset, labels,
+            kw.get("budgets") or FAITH_BUDGETS,
+            FAITH_DO_INSERTION if kw.get("do_insertion") is None else kw["do_insertion"])
+            for mode in modes}
     if phi is None:
         phi, meta = aligned_tab_attributions(model, raw_df, imgs,
                                              background=background, verbose=verbose)
@@ -1201,9 +1250,11 @@ def aligned_signed_faithfulness(model, run_dir, best_epoch, phi=None, labels=Non
     results = {"aligned_meta": meta}
     for mode in modes:
         key, n_eff = attribution_order_key(phi, labels=labels, mode=mode)
-        out = explanation_faithfulness(
-            model, run_dir, best_epoch, methods=("tabular",), tab_imp_override=key,
-            out_name=f"{out_prefix}_{mode}", out_dir=out_dir, save=save, verbose=False, **kw)
+        out = cached.get(mode)
+        if out is None:
+            out = explanation_faithfulness(
+                model, run_dir, best_epoch, methods=("tabular",), tab_imp_override=key,
+                out_name=f"{out_prefix}_{mode}", out_dir=out_dir, save=save, verbose=False, **kw)
 
         flip = -1.0 if mode in SIGN_FLIPPED_MODES else 1.0
         suffix = "_signflipped" if flip < 0 else ""

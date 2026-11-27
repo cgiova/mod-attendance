@@ -267,8 +267,11 @@ def test_notebook_cell_uses_selected_study():
     for dataset in ("cmmd", "isic24", "brset", "symile"):
         path = ROOT / f"notebooks/modality_attendance/{dataset}/{dataset}_modattendance_train.ipynb"
         nb = json.loads(path.read_text())
-        source = next("".join(c["source"]) for c in nb["cells"]
-                      if "".join(c.get("source", [])).startswith("# @@CF_GAMMA_CALIBRATION@@"))
+        sources = ["".join(c.get("source", [])) for c in nb["cells"]]
+        matches = [i for i, s in enumerate(sources) if s.startswith("# @@CF_GAMMA_CALIBRATION@@")]
+        assert len(matches) == 1, f"{dataset}: CF calibration must occur exactly once"
+        assert sources[matches[0] - 1].startswith("# @@SWEEP_CF@@"), dataset
+        source = sources[matches[0]]
         compile(source, f"{dataset} @@CF_GAMMA_CALIBRATION@@", "exec")
         assert all(name not in source for name in ["cf_study_dir", "cf_combined", "validation_ds", "stamp_aggregate"])
         with patch.object(fc, "complete_gamma_calibration", return_value="complete") as complete:
@@ -305,11 +308,16 @@ def test_posthoc_replacement_reuses_enriched_sweep():
         def __getattr__(self, name):
             return lambda *args, **kwargs: figures.append(Path(args[0])) if name == "savefig" else None
 
-    nb = json.loads((ROOT / "notebooks/modality_attendance/cmmd/cmmd_modattendance_posthoc.ipynb").read_text())
-    integrated = next("".join(c["source"]) for c in nb["cells"]
-                      if "".join(c.get("source", [])).startswith("# @@CF_GAMMA_SWEEP@@"))
     replacement = (ROOT / "docs/CF_GAMMA_SWEEP.py").read_text()
-    for label, source in (("cmmd", integrated), ("replacement", replacement)):
+    sources = [("replacement", replacement)]
+    for dataset in ("cmmd", "brset", "isic24", "symile"):
+        path = ROOT / f"notebooks/modality_attendance/{dataset}/{dataset}_modattendance_posthoc.ipynb"
+        nb = json.loads(path.read_text())
+        cells = ["".join(c.get("source", [])) for c in nb["cells"]]
+        matches = [s for s in cells if "complete_gamma_calibration" in s]
+        assert len(matches) == 1 and matches[0].startswith("# @@CF_GAMMA_SWEEP@@"), dataset
+        sources.append((dataset, matches[0]))
+    for label, source in sources:
         figures, displayed = [], []
         namespace = dict(cf_study_dir=STUDY, study_dir="unrelated-gating-study",
                          cf_combined=RUNS, os=os, pd=pd, ART_PATH=ART_ROOT,

@@ -1,5 +1,7 @@
 # CMMD attendance sweep cells
 
+The replacements below are integrated into all four datasets' canonical training and post-hoc notebooks, using each dataset's own study timestamps. No manual pasting remains. The CMMD examples serve as reference source; experimental execution remains user-run.
+
 These replacements extend the selected CMMD studies. The notebooks are edited by pasting
 the blocks below; the shared Python implementations are integrated independently. Run the
 training setup with the saved split, sampling, FeatureSpace and six seeds unchanged.
@@ -95,12 +97,22 @@ for _impl, _cs in _runs.items():
         assert _weights.first().loc["base"] == 1e-4, "Wrong reference entropy weight"
     print(f"{_impl}: {len(_cs)} completed runs, {EXPECTED_SETTINGS[_impl]} settings")
 
-assert (sum(map(len, _runs.values())) == N_CANONICAL_RUNS
-        and None not in _spaces.values() and None not in _space_fps.values()
-        and len(set(_space_fps.values())) == 1), (
-    f"Expected {N_CANONICAL_RUNS} runs with one FeatureSpace fingerprint"
+assert sum(map(len, _runs.values())) == N_CANONICAL_RUNS, (
+    f"Expected {N_CANONICAL_RUNS} canonical runs"
+)
+assert None not in _spaces.values() and len(set(_spaces.values())) == 1, (
+    "Canonical runs must declare one shared FeatureSpace file"
+)
+assert len(set(_space_fps.values()) - {None}) <= 1, (
+    "Canonical runs declare conflicting FeatureSpace fingerprints"
 )
 ```
+
+In `@@FEATURE_SPACE@@`, validate every configuration against the loaded encoder with
+`assert_run_feature_space(cfg, config_path, FEATURE_SPACE_FILE, FEATURE_SPACE_FP)` from
+`isic24.xai_driver`. Recorded fingerprints must match the live adapted state. Legacy runs
+without a fingerprint must declare the same FeatureSpace file; their check is file-only,
+not retrospective proof of the original adapt state. Do not backfill run configurations.
 
 The trained registry has 156 rows: CF's 54 intervention evaluations stay in its dedicated
 sweep CSV, outside the trained-run registry. `CENTRAL_SETTINGS` remains unchanged;
